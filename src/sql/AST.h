@@ -53,8 +53,8 @@ struct SQLCommand {
     Vector<Column> columns;
     Vector<Value> insert_values;
     
-    std::string update_column;
-    Value update_value;
+    Vector<std::string> update_columns;
+    Vector<Value> update_values;
     
     Vector<std::string> select_columns; 
     

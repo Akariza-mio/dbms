@@ -43,8 +43,8 @@ void test_parser() {
     cmd = Parser::parse("update person set name = \"mary\" where id = 1001");
     assert(cmd.type == CommandType::UPDATE);
     assert(cmd.table_name == "person");
-    assert(cmd.update_column == "name");
-    assert(cmd.update_value.str_val == "mary");
+    assert(cmd.update_columns[0] == "name");
+    assert(cmd.update_values[0].str_val == "mary");
     assert(cmd.where_conds[0].column == "id");
     assert(cmd.where_conds[0].op == OpType::EQ);
     assert(cmd.where_conds[0].value.int_val == 1001);

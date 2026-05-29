@@ -400,8 +400,12 @@ public:
                         bpt = std::make_unique<BPlusTree>(p.get());
                     }
                     
-                    int set_col_idx = get_col_index(t, cmd.update_column);
-                    if (set_col_idx == -1) return "Error: Unknown column in SET clause.";
+                    Vector<int> set_col_indices;
+                    for (size_t k = 0; k < cmd.update_columns.size(); ++k) {
+                        int idx = get_col_index(t, cmd.update_columns[k]);
+                        if (idx == -1) return "Error: Unknown column in SET clause.";
+                        set_col_indices.push_back(idx);
+                    }
                     
                     Vector<int> where_col_indices;
                     for (size_t i = 0; i < cmd.where_conds.size(); ++i) {
@@ -427,21 +431,26 @@ public:
                         tf.scan_all_rows(all_rows, all_offs);
                     }
                     
-                    if (pk_idx != -1 && set_col_idx == pk_idx) {
+                    int pk_update_idx = -1;
+                    for (size_t k = 0; k < set_col_indices.size(); ++k) {
+                        if (set_col_indices[k] == pk_idx) { pk_update_idx = k; break; }
+                    }
+
+                    if (pk_idx != -1 && pk_update_idx != -1) {
                         Vector<Value> new_pks;
                         for (size_t i = 0; i < all_rows.size(); ++i) {
                             if (evaluate_where(cmd.where_conds, where_col_indices, all_rows[i])) {
-                                if (!(all_rows[i].values[pk_idx] == cmd.update_value)) {
+                                if (!(all_rows[i].values[pk_idx] == cmd.update_values[pk_update_idx])) {
                                     uint32_t dummy;
-                                    if (bpt->search(cmd.update_value, dummy)) {
+                                    if (bpt->search(cmd.update_values[pk_update_idx], dummy)) {
                                         return "Error: Duplicate entry for primary key.";
                                     }
                                     for (size_t k = 0; k < new_pks.size(); ++k) {
-                                        if (new_pks[k] == cmd.update_value) {
+                                        if (new_pks[k] == cmd.update_values[pk_update_idx]) {
                                             return "Error: Duplicate entry for primary key in update set.";
                                         }
                                     }
-                                    new_pks.push_back(cmd.update_value);
+                                    new_pks.push_back(cmd.update_values[pk_update_idx]);
                                 }
                             }
                         }
@@ -453,7 +462,9 @@ public:
                             tf.delete_row(all_offs[i]);
                             if (bpt) bpt->remove(all_rows[i].values[pk_idx]);
                             
-                            all_rows[i].values[set_col_idx] = cmd.update_value;
+                            for (size_t k = 0; k < set_col_indices.size(); ++k) {
+                                all_rows[i].values[set_col_indices[k]] = cmd.update_values[k];
+                            }
                             
                             uint32_t new_off = tf.insert_row(all_rows[i]);
                             if (bpt) bpt->insert(all_rows[i].values[pk_idx], new_off);

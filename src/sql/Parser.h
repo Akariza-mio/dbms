@@ -191,9 +191,14 @@ public:
             size_t i = 1;
             cmd.table_name = to_lower(tokens[i++]);
             if (to_lower(tokens[i++]) != "set") throw std::runtime_error("Expected SET keyword");
-            cmd.update_column = to_lower(tokens[i++]);
-            if (tokens[i++] != "=") throw std::runtime_error("Expected '=' in SET clause");
-            cmd.update_value = parse_value(tokens[i++]);
+            while (i < tokens.size() && to_lower(tokens[i]) != "where") {
+                cmd.update_columns.push_back(to_lower(tokens[i++]));
+                if (i >= tokens.size() || tokens[i++] != "=") throw std::runtime_error("Expected '=' in SET clause");
+                if (i >= tokens.size()) throw std::runtime_error("Incomplete SET clause");
+                cmd.update_values.push_back(parse_value(tokens[i++]));
+                if (i < tokens.size() && tokens[i] == ",") i++;
+                else if (i < tokens.size() && to_lower(tokens[i]) != "where") throw std::runtime_error("Syntax error in SET clause");
+            }
             parse_where(tokens, i, cmd);
         } else if (first == "select") {
             if (tokens.size() < 4) throw std::runtime_error("Syntax error in SELECT statement");
