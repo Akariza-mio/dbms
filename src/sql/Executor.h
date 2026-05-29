@@ -12,17 +12,6 @@
 
 namespace dbms {
 
-std::string row_to_string(const Row& row) {
-    std::string res;
-    for (size_t i = 0; i < row.values.size(); ++i) {
-        if (row.values[i].type == DataType::INT) {
-            res += std::to_string(row.values[i].int_val) + "\t";
-        } else {
-            res += row.values[i].str_val + "\t";
-        }
-    }
-    return res;
-}
 
 class Executor {
 private:
@@ -49,6 +38,26 @@ private:
             if (table->columns[i].is_primary) return i;
         }
         return -1;
+    }
+
+    bool evaluate_where(const Vector<WhereCondition>& conds, const Vector<int>& col_indices, const Row& row) {
+        if (conds.empty()) return true;
+        bool result = true;
+        LogicalOp current_logic = LogicalOp::AND;
+        for (size_t i = 0; i < conds.size(); ++i) {
+            bool cond_res = false;
+            if (conds[i].op == OpType::EQ) cond_res = (row.values[col_indices[i]] == conds[i].value);
+            else if (conds[i].op == OpType::LT) cond_res = (row.values[col_indices[i]] < conds[i].value);
+            else if (conds[i].op == OpType::GT) cond_res = (row.values[col_indices[i]] > conds[i].value);
+            
+            if (i == 0) result = cond_res;
+            else {
+                if (current_logic == LogicalOp::AND) result = result && cond_res;
+                else if (current_logic == LogicalOp::OR) result = result || cond_res;
+            }
+            current_logic = conds[i].next_logic;
+        }
+        return result;
     }
 
 public:
@@ -89,6 +98,23 @@ public:
                         res += dbs[i].name + "\n";
                     }
                     return res + "(" + std::to_string(dbs.size()) + " rows)";
+                }
+                    
+                case CommandType::SHOW_TABLES: {
+                    if (current_db_.empty()) throw std::runtime_error("No database selected");
+                    Database* db = catalog_.get_database(current_db_);
+                    std::string res = "Tables in " + current_db_ + ":\n";
+                    for (size_t i = 0; i < db->tables.size(); ++i) {
+                        res += "- " + db->tables[i].name + " (";
+                        for (size_t j = 0; j < db->tables[i].columns.size(); ++j) {
+                            res += db->tables[i].columns[j].name + " ";
+                            res += (db->tables[i].columns[j].type == DataType::INT ? "int" : "string");
+                            if (db->tables[i].columns[j].is_primary) res += " primary";
+                            if (j < db->tables[i].columns.size() - 1) res += ", ";
+                        }
+                        res += ")\n";
+                    }
+                    return res + "(" + std::to_string(db->tables.size()) + " tables)";
                 }
                     
                 case CommandType::CREATE_TABLE: {
@@ -174,37 +200,93 @@ public:
                     }
                     if (!t) return "Error: Table does not exist.";
                     
+                    Vector<int> proj_idx;
+                    Vector<size_t> proj_width;
+                    if (cmd.select_columns.size() == 1 && cmd.select_columns[0] == "*") {
+                        for (size_t i = 0; i < t->columns.size(); ++i) {
+                            proj_idx.push_back(i);
+                            proj_width.push_back(t->columns[i].name.length() <= 8 ? 8 : 16);
+                        }
+                    } else {
+                        for (size_t i = 0; i < cmd.select_columns.size(); ++i) {
+                            int idx = get_col_index(t, cmd.select_columns[i]);
+                            if (idx == -1) return "Error: Unknown column in select list.";
+                            proj_idx.push_back(idx);
+                            proj_width.push_back(t->columns[idx].name.length() <= 8 ? 8 : 16);
+                        }
+                    }
+                    
                     TableFile tf(get_table_path(cmd.table_name));
                     Vector<Row> all_rows;
                     Vector<uint32_t> all_offs;
                     tf.scan_all_rows(all_rows, all_offs);
                     
-                    int where_col_idx = -1;
-                    if (cmd.where_cond.op != OpType::NONE) {
-                        where_col_idx = get_col_index(t, cmd.where_cond.column);
-                        if (where_col_idx == -1) return "Error: Unknown column in where clause.";
+                    Vector<int> where_col_indices;
+                    for (size_t i = 0; i < cmd.where_conds.size(); ++i) {
+                        int idx = get_col_index(t, cmd.where_conds[i].column);
+                        if (idx == -1) return "Error: Unknown column in where clause.";
+                        where_col_indices.push_back(idx);
                     }
+                    
+                    Vector<Row> matched_rows;
+                    for (size_t i = 0; i < all_rows.size(); ++i) {
+                        if (evaluate_where(cmd.where_conds, where_col_indices, all_rows[i])) {
+                            matched_rows.push_back(all_rows[i]);
+                        }
+                    }
+                    
+                    for (size_t j = 0; j < proj_idx.size(); ++j) {
+                        size_t max_len = t->columns[proj_idx[j]].name.length();
+                        for (size_t i = 0; i < matched_rows.size(); ++i) {
+                            std::string val_str;
+                            if (matched_rows[i].values[proj_idx[j]].type == DataType::INT) {
+                                val_str = std::to_string(matched_rows[i].values[proj_idx[j]].int_val);
+                            } else {
+                                val_str = matched_rows[i].values[proj_idx[j]].str_val;
+                            }
+                            if (val_str.length() > max_len) max_len = val_str.length();
+                        }
+                        proj_width[j] = (max_len > 8) ? 16 : 8;
+                    }
+                    
+                    auto pad_str = [](std::string s, size_t w) {
+                        if (s.length() > w) s = s.substr(0, w);
+                        if (s.length() < w) s += std::string(w - s.length(), ' ');
+                        return s;
+                    };
                     
                     std::string res;
-                    for (size_t i = 0; i < t->columns.size(); ++i) {
-                        res += t->columns[i].name + "\t";
+                    for (size_t i = 0; i < proj_idx.size(); ++i) {
+                        res += pad_str(t->columns[proj_idx[i]].name, proj_width[i]) + " | ";
                     }
-                    res += "\n--------------------\n";
+                    if (!proj_idx.empty()) {
+                        res.pop_back(); res.pop_back(); res.pop_back();
+                    }
+                    res += "\n";
+                    for (size_t i = 0; i < proj_idx.size(); ++i) {
+                        res += std::string(proj_width[i], '-') + "-+-";
+                    }
+                    if (!proj_idx.empty()) {
+                        res.pop_back(); res.pop_back(); res.pop_back();
+                    }
+                    res += "\n";
                     
-                    int count = 0;
-                    for (size_t i = 0; i < all_rows.size(); ++i) {
-                        bool match = true;
-                        if (where_col_idx != -1) {
-                            if (cmd.where_cond.op == OpType::EQ) match = all_rows[i].values[where_col_idx] == cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::LT) match = all_rows[i].values[where_col_idx] < cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::GT) match = all_rows[i].values[where_col_idx] > cmd.where_cond.value;
+                    for (size_t i = 0; i < matched_rows.size(); ++i) {
+                        for (size_t j = 0; j < proj_idx.size(); ++j) {
+                            std::string val_str;
+                            if (matched_rows[i].values[proj_idx[j]].type == DataType::INT) {
+                                val_str = std::to_string(matched_rows[i].values[proj_idx[j]].int_val);
+                            } else {
+                                val_str = matched_rows[i].values[proj_idx[j]].str_val;
+                            }
+                            res += pad_str(val_str, proj_width[j]) + " | ";
                         }
-                        if (match) {
-                            res += row_to_string(all_rows[i]) + "\n";
-                            count++;
+                        if (!proj_idx.empty()) {
+                            res.pop_back(); res.pop_back(); res.pop_back();
                         }
+                        res += "\n";
                     }
-                    res += "(" + std::to_string(count) + " rows)";
+                    res += "(" + std::to_string(matched_rows.size()) + " rows)";
                     return res;
                 }
                 
@@ -227,10 +309,11 @@ public:
                         bpt = std::make_unique<BPlusTree>(p.get());
                     }
                     
-                    int where_col_idx = -1;
-                    if (cmd.where_cond.op != OpType::NONE) {
-                        where_col_idx = get_col_index(t, cmd.where_cond.column);
-                        if (where_col_idx == -1) return "Error: Unknown column in where clause.";
+                    Vector<int> where_col_indices;
+                    for (size_t i = 0; i < cmd.where_conds.size(); ++i) {
+                        int idx = get_col_index(t, cmd.where_conds[i].column);
+                        if (idx == -1) return "Error: Unknown column in where clause.";
+                        where_col_indices.push_back(idx);
                     }
                     
                     Vector<Row> all_rows;
@@ -239,13 +322,7 @@ public:
                     
                     int count = 0;
                     for (size_t i = 0; i < all_rows.size(); ++i) {
-                        bool match = true;
-                        if (where_col_idx != -1) {
-                            if (cmd.where_cond.op == OpType::EQ) match = all_rows[i].values[where_col_idx] == cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::LT) match = all_rows[i].values[where_col_idx] < cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::GT) match = all_rows[i].values[where_col_idx] > cmd.where_cond.value;
-                        }
-                        if (match) {
+                        if (evaluate_where(cmd.where_conds, where_col_indices, all_rows[i])) {
                             tf.delete_row(all_offs[i]);
                             if (bpt) {
                                 bpt->remove(all_rows[i].values[pk_idx]);
@@ -278,25 +355,40 @@ public:
                     int set_col_idx = get_col_index(t, cmd.update_column);
                     if (set_col_idx == -1) return "Error: Unknown column in SET clause.";
                     
-                    int where_col_idx = -1;
-                    if (cmd.where_cond.op != OpType::NONE) {
-                        where_col_idx = get_col_index(t, cmd.where_cond.column);
-                        if (where_col_idx == -1) return "Error: Unknown column in where clause.";
+                    Vector<int> where_col_indices;
+                    for (size_t i = 0; i < cmd.where_conds.size(); ++i) {
+                        int idx = get_col_index(t, cmd.where_conds[i].column);
+                        if (idx == -1) return "Error: Unknown column in where clause.";
+                        where_col_indices.push_back(idx);
                     }
                     
                     Vector<Row> all_rows;
                     Vector<uint32_t> all_offs;
                     tf.scan_all_rows(all_rows, all_offs);
                     
+                    if (pk_idx != -1 && set_col_idx == pk_idx) {
+                        Vector<Value> new_pks;
+                        for (size_t i = 0; i < all_rows.size(); ++i) {
+                            if (evaluate_where(cmd.where_conds, where_col_indices, all_rows[i])) {
+                                if (!(all_rows[i].values[pk_idx] == cmd.update_value)) {
+                                    uint32_t dummy;
+                                    if (bpt->search(cmd.update_value, dummy)) {
+                                        return "Error: Duplicate entry for primary key.";
+                                    }
+                                    for (size_t k = 0; k < new_pks.size(); ++k) {
+                                        if (new_pks[k] == cmd.update_value) {
+                                            return "Error: Duplicate entry for primary key in update set.";
+                                        }
+                                    }
+                                    new_pks.push_back(cmd.update_value);
+                                }
+                            }
+                        }
+                    }
+                    
                     int count = 0;
                     for (size_t i = 0; i < all_rows.size(); ++i) {
-                        bool match = true;
-                        if (where_col_idx != -1) {
-                            if (cmd.where_cond.op == OpType::EQ) match = all_rows[i].values[where_col_idx] == cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::LT) match = all_rows[i].values[where_col_idx] < cmd.where_cond.value;
-                            else if (cmd.where_cond.op == OpType::GT) match = all_rows[i].values[where_col_idx] > cmd.where_cond.value;
-                        }
-                        if (match) {
+                        if (evaluate_where(cmd.where_conds, where_col_indices, all_rows[i])) {
                             tf.delete_row(all_offs[i]);
                             if (bpt) bpt->remove(all_rows[i].values[pk_idx]);
                             

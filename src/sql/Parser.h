@@ -61,14 +61,34 @@ private:
     static void parse_where(const Vector<std::string>& tokens, size_t& i, SQLCommand& cmd) {
         if (i < tokens.size() && to_lower(tokens[i]) == "where") {
             i++;
-            if (i + 2 >= tokens.size()) throw std::runtime_error("Incomplete WHERE clause");
-            cmd.where_cond.column = to_lower(tokens[i++]);
-            std::string op_str = tokens[i++];
-            if (op_str == "=") cmd.where_cond.op = OpType::EQ;
-            else if (op_str == "<") cmd.where_cond.op = OpType::LT;
-            else if (op_str == ">") cmd.where_cond.op = OpType::GT;
-            else throw std::runtime_error("Unsupported operator: " + op_str);
-            cmd.where_cond.value = parse_value(tokens[i++]);
+            while (i < tokens.size()) {
+                WhereCondition cond;
+                cond.column = to_lower(tokens[i++]);
+                if (i >= tokens.size()) throw std::runtime_error("Incomplete WHERE clause");
+                std::string op_str = tokens[i++];
+                if (op_str == "=") cond.op = OpType::EQ;
+                else if (op_str == "<") cond.op = OpType::LT;
+                else if (op_str == ">") cond.op = OpType::GT;
+                else throw std::runtime_error("Unsupported operator: " + op_str);
+                
+                if (i >= tokens.size()) throw std::runtime_error("Incomplete WHERE clause");
+                cond.value = parse_value(tokens[i++]);
+                
+                if (i < tokens.size()) {
+                    std::string logic = to_lower(tokens[i]);
+                    if (logic == "and") {
+                        cond.next_logic = LogicalOp::AND;
+                        i++;
+                    } else if (logic == "or") {
+                        cond.next_logic = LogicalOp::OR;
+                        i++;
+                    } else {
+                        cmd.where_conds.push_back(cond);
+                        break;
+                    }
+                }
+                cmd.where_conds.push_back(cond);
+            }
         }
     }
 
@@ -88,6 +108,9 @@ public:
         if (first == "show") {
             if (tokens.size() > 1 && (to_lower(tokens[1]) == "databases" || to_lower(tokens[1]) == "database")) {
                 cmd.type = CommandType::SHOW_DATABASES;
+                return cmd;
+            } else if (tokens.size() > 1 && (to_lower(tokens[1]) == "tables" || to_lower(tokens[1]) == "table")) {
+                cmd.type = CommandType::SHOW_TABLES;
                 return cmd;
             } else {
                 throw std::runtime_error("Syntax error in SHOW statement");
@@ -180,10 +203,14 @@ public:
                 cmd.select_columns.push_back("*");
                 i++;
             } else {
-                cmd.select_columns.push_back(to_lower(tokens[i++]));
-                // To keep it simple, assume only one column or * (as per PDF: <column> | *)
+                while (i < tokens.size() && to_lower(tokens[i]) != "from") {
+                    if (tokens[i] != ",") {
+                        cmd.select_columns.push_back(to_lower(tokens[i]));
+                    }
+                    i++;
+                }
             }
-            if (to_lower(tokens[i++]) != "from") throw std::runtime_error("Expected FROM keyword");
+            if (i >= tokens.size() || to_lower(tokens[i++]) != "from") throw std::runtime_error("Expected FROM keyword");
             cmd.table_name = to_lower(tokens[i++]);
             parse_where(tokens, i, cmd);
         } else {

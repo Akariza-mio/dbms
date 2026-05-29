@@ -35,9 +35,9 @@ void test_parser() {
     assert(cmd.type == CommandType::SELECT);
     assert(cmd.select_columns[0] == "name");
     assert(cmd.table_name == "person");
-    assert(cmd.where_cond.column == "id");
-    assert(cmd.where_cond.op == OpType::EQ);
-    assert(cmd.where_cond.value.int_val == 1001);
+    assert(cmd.where_conds[0].column == "id");
+    assert(cmd.where_conds[0].op == OpType::EQ);
+    assert(cmd.where_conds[0].value.int_val == 1001);
     
     // UPDATE
     cmd = Parser::parse("update person set name = \"mary\" where id = 1001");
@@ -45,9 +45,9 @@ void test_parser() {
     assert(cmd.table_name == "person");
     assert(cmd.update_column == "name");
     assert(cmd.update_value.str_val == "mary");
-    assert(cmd.where_cond.column == "id");
-    assert(cmd.where_cond.op == OpType::EQ);
-    assert(cmd.where_cond.value.int_val == 1001);
+    assert(cmd.where_conds[0].column == "id");
+    assert(cmd.where_conds[0].op == OpType::EQ);
+    assert(cmd.where_conds[0].value.int_val == 1001);
 
     std::cout << "Parser tests passed!" << std::endl;
 }

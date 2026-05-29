@@ -11,6 +11,7 @@ enum class CommandType {
     DROP_DATABASE,
     USE_DATABASE,
     SHOW_DATABASES,
+    SHOW_TABLES,
     CREATE_TABLE,
     DROP_TABLE,
     INSERT,
@@ -23,11 +24,17 @@ enum class CommandType {
 
 enum class OpType { EQ, LT, GT, NONE };
 
-struct Condition {
+enum class LogicalOp {
+    NONE,
+    AND,
+    OR
+};
+
+struct WhereCondition {
     std::string column;
-    OpType op;
+    OpType op = OpType::NONE;
     Value value;
-    Condition() : op(OpType::NONE) {}
+    LogicalOp next_logic = LogicalOp::NONE;
 };
 
 struct SQLCommand {
@@ -43,7 +50,7 @@ struct SQLCommand {
     
     Vector<std::string> select_columns; 
     
-    Condition where_cond;
+    Vector<WhereCondition> where_conds;
 };
 
 } // namespace dbms
