@@ -18,6 +18,7 @@ enum class CommandType {
     DELETE,
     UPDATE,
     SELECT,
+    ALTER_TABLE,
     EXIT,
     UNKNOWN
 };
@@ -28,6 +29,13 @@ enum class LogicalOp {
     NONE,
     AND,
     OR
+};
+
+enum class AlterType {
+    ADD_COLUMN,
+    DROP_COLUMN,
+    RENAME_TABLE,
+    RENAME_COLUMN
 };
 
 struct WhereCondition {
@@ -51,6 +59,11 @@ struct SQLCommand {
     Vector<std::string> select_columns; 
     
     Vector<WhereCondition> where_conds;
+
+    AlterType alter_type;
+    std::string alter_col_name;
+    std::string alter_new_name;
+    DataType alter_col_type;
 };
 
 } // namespace dbms

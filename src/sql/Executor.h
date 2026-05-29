@@ -9,6 +9,7 @@
 #include <memory>
 #include <sstream>
 #include <sys/stat.h>
+#include <cstdio>
 
 namespace dbms {
 
@@ -58,6 +59,22 @@ private:
             current_logic = conds[i].next_logic;
         }
         return result;
+    }
+
+    bool can_use_index(const Vector<WhereCondition>& conds, const std::string& pk_col_name, Value& out_pk_val) {
+        if (pk_col_name.empty() || conds.empty()) return false;
+        
+        for (size_t i = 0; i < conds.size(); ++i) {
+            if (conds[i].next_logic == LogicalOp::OR) return false;
+        }
+        
+        for (size_t i = 0; i < conds.size(); ++i) {
+            if (conds[i].column == pk_col_name && conds[i].op == OpType::EQ) {
+                out_pk_val = conds[i].value;
+                return true;
+            }
+        }
+        return false;
     }
 
 public:
@@ -219,7 +236,25 @@ public:
                     TableFile tf(get_table_path(cmd.table_name));
                     Vector<Row> all_rows;
                     Vector<uint32_t> all_offs;
-                    tf.scan_all_rows(all_rows, all_offs);
+                    
+                    int pk_idx = get_primary_col_index(t);
+                    Value pk_val;
+                    std::string pk_col_name = pk_idx != -1 ? t->columns[pk_idx].name : "";
+                    
+                    if (pk_idx != -1 && can_use_index(cmd.where_conds, pk_col_name, pk_val)) {
+                        Pager p(get_index_path(cmd.table_name));
+                        BPlusTree bpt(&p);
+                        uint32_t offset;
+                        if (bpt.search(pk_val, offset)) {
+                            Row row;
+                            if (tf.get_row(offset, row)) {
+                                all_rows.push_back(row);
+                                all_offs.push_back(offset);
+                            }
+                        }
+                    } else {
+                        tf.scan_all_rows(all_rows, all_offs);
+                    }
                     
                     Vector<int> where_col_indices;
                     for (size_t i = 0; i < cmd.where_conds.size(); ++i) {
@@ -318,7 +353,20 @@ public:
                     
                     Vector<Row> all_rows;
                     Vector<uint32_t> all_offs;
-                    tf.scan_all_rows(all_rows, all_offs);
+                    Value pk_val;
+                    std::string pk_col_name = pk_idx != -1 ? t->columns[pk_idx].name : "";
+                    if (bpt && can_use_index(cmd.where_conds, pk_col_name, pk_val)) {
+                        uint32_t offset;
+                        if (bpt->search(pk_val, offset)) {
+                            Row row;
+                            if (tf.get_row(offset, row)) {
+                                all_rows.push_back(row);
+                                all_offs.push_back(offset);
+                            }
+                        }
+                    } else {
+                        tf.scan_all_rows(all_rows, all_offs);
+                    }
                     
                     int count = 0;
                     for (size_t i = 0; i < all_rows.size(); ++i) {
@@ -364,7 +412,20 @@ public:
                     
                     Vector<Row> all_rows;
                     Vector<uint32_t> all_offs;
-                    tf.scan_all_rows(all_rows, all_offs);
+                    Value pk_val;
+                    std::string pk_col_name = pk_idx != -1 ? t->columns[pk_idx].name : "";
+                    if (bpt && can_use_index(cmd.where_conds, pk_col_name, pk_val)) {
+                        uint32_t offset;
+                        if (bpt->search(pk_val, offset)) {
+                            Row row;
+                            if (tf.get_row(offset, row)) {
+                                all_rows.push_back(row);
+                                all_offs.push_back(offset);
+                            }
+                        }
+                    } else {
+                        tf.scan_all_rows(all_rows, all_offs);
+                    }
                     
                     if (pk_idx != -1 && set_col_idx == pk_idx) {
                         Vector<Value> new_pks;
@@ -401,6 +462,108 @@ public:
                         }
                     }
                     return "Updated " + std::to_string(count) + " rows.";
+                }
+
+                case CommandType::ALTER_TABLE: {
+                    if (current_db_.empty()) throw std::runtime_error("No database selected");
+                    Database* db = catalog_.get_database(current_db_);
+                    Table* t = nullptr;
+                    for (size_t i = 0; i < db->tables.size(); ++i) {
+                        if (db->tables[i].name == cmd.table_name) { t = &db->tables[i]; break; }
+                    }
+                    if (!t) return "Error: Table does not exist.";
+
+                    if (cmd.alter_type == AlterType::RENAME_TABLE) {
+                        for (size_t i = 0; i < db->tables.size(); ++i) {
+                            if (db->tables[i].name == cmd.alter_new_name) return "Error: Table name already exists.";
+                        }
+                        std::rename(get_table_path(cmd.table_name).c_str(), get_table_path(cmd.alter_new_name).c_str());
+                        std::rename(get_index_path(cmd.table_name).c_str(), get_index_path(cmd.alter_new_name).c_str());
+                        t->name = cmd.alter_new_name;
+                        catalog_.save();
+                        return "Table renamed successfully.";
+                    }
+                    else if (cmd.alter_type == AlterType::RENAME_COLUMN) {
+                        int col_idx = get_col_index(t, cmd.alter_col_name);
+                        if (col_idx == -1) return "Error: Column does not exist.";
+                        if (get_col_index(t, cmd.alter_new_name) != -1) return "Error: New column name already exists.";
+                        t->columns[col_idx].name = cmd.alter_new_name;
+                        catalog_.save();
+                        return "Column renamed successfully.";
+                    }
+                    else if (cmd.alter_type == AlterType::ADD_COLUMN) {
+                        if (get_col_index(t, cmd.alter_col_name) != -1) return "Error: Column already exists.";
+                        
+                        Vector<Row> all_rows;
+                        Vector<uint32_t> all_offs;
+                        {
+                            TableFile tf(get_table_path(cmd.table_name));
+                            tf.scan_all_rows(all_rows, all_offs);
+                        }
+                        
+                        t->columns.push_back(Column(cmd.alter_col_name, cmd.alter_col_type, false));
+                        catalog_.save();
+                        
+                        std::remove(get_table_path(cmd.table_name).c_str());
+                        TableFile new_tf(get_table_path(cmd.table_name));
+                        
+                        int pk_idx = get_primary_col_index(t);
+                        std::unique_ptr<Pager> p;
+                        std::unique_ptr<BPlusTree> bpt;
+                        if (pk_idx != -1) {
+                            std::remove(get_index_path(cmd.table_name).c_str());
+                            p = std::make_unique<Pager>(get_index_path(cmd.table_name));
+                            bpt = std::make_unique<BPlusTree>(p.get());
+                        }
+                        
+                        for (size_t i = 0; i < all_rows.size(); ++i) {
+                            if (cmd.alter_col_type == DataType::INT) {
+                                all_rows[i].values.push_back(Value(0));
+                            } else {
+                                all_rows[i].values.push_back(Value(""));
+                            }
+                            uint32_t new_off = new_tf.insert_row(all_rows[i]);
+                            if (bpt) bpt->insert(all_rows[i].values[pk_idx], new_off);
+                        }
+                        
+                        return "Column added successfully.";
+                    }
+                    else if (cmd.alter_type == AlterType::DROP_COLUMN) {
+                        int col_idx = get_col_index(t, cmd.alter_col_name);
+                        if (col_idx == -1) return "Error: Column does not exist.";
+                        if (t->columns[col_idx].is_primary) return "Error: Cannot drop primary key column.";
+                        
+                        Vector<Row> all_rows;
+                        Vector<uint32_t> all_offs;
+                        {
+                            TableFile tf(get_table_path(cmd.table_name));
+                            tf.scan_all_rows(all_rows, all_offs);
+                        }
+                        
+                        t->columns.erase(col_idx);
+                        catalog_.save();
+                        
+                        std::remove(get_table_path(cmd.table_name).c_str());
+                        TableFile new_tf(get_table_path(cmd.table_name));
+                        
+                        int pk_idx = get_primary_col_index(t);
+                        std::unique_ptr<Pager> p;
+                        std::unique_ptr<BPlusTree> bpt;
+                        if (pk_idx != -1) {
+                            std::remove(get_index_path(cmd.table_name).c_str());
+                            p = std::make_unique<Pager>(get_index_path(cmd.table_name));
+                            bpt = std::make_unique<BPlusTree>(p.get());
+                        }
+                        
+                        for (size_t i = 0; i < all_rows.size(); ++i) {
+                            all_rows[i].values.erase(col_idx);
+                            uint32_t new_off = new_tf.insert_row(all_rows[i]);
+                            if (bpt) bpt->insert(all_rows[i].values[pk_idx], new_off);
+                        }
+                        
+                        return "Column dropped successfully.";
+                    }
+                    break;
                 }
 
                 default:

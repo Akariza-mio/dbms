@@ -49,6 +49,36 @@ void test_parser() {
     assert(cmd.where_conds[0].op == OpType::EQ);
     assert(cmd.where_conds[0].value.int_val == 1001);
 
+    // ALTER TABLE ADD
+    cmd = Parser::parse("alter table person add age int");
+    assert(cmd.type == CommandType::ALTER_TABLE);
+    assert(cmd.table_name == "person");
+    assert(cmd.alter_type == AlterType::ADD_COLUMN);
+    assert(cmd.alter_col_name == "age");
+    assert(cmd.alter_col_type == DataType::INT);
+
+    // ALTER TABLE DROP
+    cmd = Parser::parse("alter table person drop column age");
+    assert(cmd.type == CommandType::ALTER_TABLE);
+    assert(cmd.table_name == "person");
+    assert(cmd.alter_type == AlterType::DROP_COLUMN);
+    assert(cmd.alter_col_name == "age");
+
+    // ALTER TABLE RENAME TO
+    cmd = Parser::parse("alter table person rename to human");
+    assert(cmd.type == CommandType::ALTER_TABLE);
+    assert(cmd.table_name == "person");
+    assert(cmd.alter_type == AlterType::RENAME_TABLE);
+    assert(cmd.alter_new_name == "human");
+
+    // ALTER TABLE RENAME COLUMN TO
+    cmd = Parser::parse("alter table person rename name to fullname");
+    assert(cmd.type == CommandType::ALTER_TABLE);
+    assert(cmd.table_name == "person");
+    assert(cmd.alter_type == AlterType::RENAME_COLUMN);
+    assert(cmd.alter_col_name == "name");
+    assert(cmd.alter_new_name == "fullname");
+
     std::cout << "Parser tests passed!" << std::endl;
 }
 

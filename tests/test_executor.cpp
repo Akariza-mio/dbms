@@ -51,6 +51,46 @@ void test_executor() {
     res = exec.execute(Parser::parse("select name from person where id = 1002"));
     assert(res.find("0 rows") != std::string::npos);
     
+    // ALTER TABLE ADD COLUMN
+    res = exec.execute(Parser::parse("alter table person add age int"));
+    assert(res == "Column added successfully.");
+    
+    // Insert after add column
+    res = exec.execute(Parser::parse("insert person values (1003, \"tom\", 20)"));
+    assert(res == "Insert successful.");
+    
+    // Select to verify new column
+    res = exec.execute(Parser::parse("select age from person where id = 1003"));
+    assert(res.find("20") != std::string::npos);
+
+    // Default values check
+    res = exec.execute(Parser::parse("select age from person where id = 1001"));
+    assert(res.find("0") != std::string::npos); // Should be default 0
+
+    // ALTER TABLE RENAME COLUMN
+    res = exec.execute(Parser::parse("alter table person rename age to years"));
+    assert(res == "Column renamed successfully.");
+
+    // ALTER TABLE DROP COLUMN
+    res = exec.execute(Parser::parse("alter table person drop column years"));
+    assert(res == "Column dropped successfully.");
+    
+    // Test drop primary key fails
+    res = exec.execute(Parser::parse("alter table person drop column id"));
+    assert(res.find("Error") != std::string::npos);
+
+    // ALTER TABLE RENAME TABLE
+    res = exec.execute(Parser::parse("alter table person rename to human"));
+    assert(res == "Table renamed successfully.");
+    
+    // Verify old table gone
+    res = exec.execute(Parser::parse("select * from person"));
+    assert(res.find("Error") != std::string::npos);
+    
+    // Verify new table exists
+    res = exec.execute(Parser::parse("select name from human where id = 1003"));
+    assert(res.find("tom") != std::string::npos);
+
     std::cout << "Executor tests passed!" << std::endl;
 }
 

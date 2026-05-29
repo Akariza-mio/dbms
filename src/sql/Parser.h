@@ -213,6 +213,38 @@ public:
             if (i >= tokens.size() || to_lower(tokens[i++]) != "from") throw std::runtime_error("Expected FROM keyword");
             cmd.table_name = to_lower(tokens[i++]);
             parse_where(tokens, i, cmd);
+        } else if (first == "alter") {
+            if (tokens.size() < 4) throw std::runtime_error("Syntax error in ALTER statement");
+            if (to_lower(tokens[1]) != "table") throw std::runtime_error("Expected TABLE after ALTER");
+            cmd.type = CommandType::ALTER_TABLE;
+            cmd.table_name = to_lower(tokens[2]);
+            std::string action = to_lower(tokens[3]);
+            if (action == "add") {
+                if (tokens.size() < 6) throw std::runtime_error("Syntax error in ALTER TABLE ADD");
+                cmd.alter_type = AlterType::ADD_COLUMN;
+                cmd.alter_col_name = to_lower(tokens[4]);
+                std::string type_str = to_lower(tokens[5]);
+                if (type_str == "int") cmd.alter_col_type = DataType::INT;
+                else if (type_str == "string") cmd.alter_col_type = DataType::STRING;
+                else throw std::runtime_error("Unsupported data type: " + type_str);
+            } else if (action == "drop") {
+                if (tokens.size() < 6 || to_lower(tokens[4]) != "column") throw std::runtime_error("Syntax error in ALTER TABLE DROP");
+                cmd.alter_type = AlterType::DROP_COLUMN;
+                cmd.alter_col_name = to_lower(tokens[5]);
+            } else if (action == "rename") {
+                if (to_lower(tokens[4]) == "to") {
+                    if (tokens.size() < 6) throw std::runtime_error("Syntax error in ALTER TABLE RENAME TO");
+                    cmd.alter_type = AlterType::RENAME_TABLE;
+                    cmd.alter_new_name = to_lower(tokens[5]);
+                } else {
+                    if (tokens.size() < 7 || to_lower(tokens[5]) != "to") throw std::runtime_error("Syntax error in ALTER TABLE RENAME COLUMN");
+                    cmd.alter_type = AlterType::RENAME_COLUMN;
+                    cmd.alter_col_name = to_lower(tokens[4]);
+                    cmd.alter_new_name = to_lower(tokens[6]);
+                }
+            } else {
+                throw std::runtime_error("Unknown ALTER action: " + action);
+            }
         } else {
             throw std::runtime_error("Unknown statement: " + first);
         }
