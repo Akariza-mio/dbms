@@ -52,6 +52,9 @@ private:
             return Value(token.substr(1, token.length() - 2));
         }
         try {
+            if (token.find('.') != std::string::npos) {
+                return Value(std::stod(token));
+            }
             return Value(std::stoi(token));
         } catch (...) {
             throw std::runtime_error("Invalid value format: " + token);
@@ -137,6 +140,7 @@ public:
                         DataType type;
                         if (type_str == "int") type = DataType::INT;
                         else if (type_str == "string") type = DataType::STRING;
+                        else if (type_str == "float") type = DataType::FLOAT;
                         else throw std::runtime_error("Unsupported data type: " + type_str);
                         
                         bool is_primary = false;
@@ -205,19 +209,48 @@ public:
             cmd.type = CommandType::SELECT;
             size_t i = 1;
             if (tokens[i] == "*") {
-                cmd.select_columns.push_back("*");
+                SelectItem item; item.column = "*";
+                cmd.select_items.push_back(item);
                 i++;
             } else {
                 while (i < tokens.size() && to_lower(tokens[i]) != "from") {
                     if (tokens[i] != ",") {
-                        cmd.select_columns.push_back(to_lower(tokens[i]));
+                        SelectItem item;
+                        std::string col = to_lower(tokens[i]);
+                        if (col == "count" || col == "max" || col == "min" || col == "avg") {
+                            if (i + 1 < tokens.size() && tokens[i+1] == "(") {
+                                if (col == "count") item.aggr = AggrFunc::COUNT;
+                                else if (col == "max") item.aggr = AggrFunc::MAX;
+                                else if (col == "min") item.aggr = AggrFunc::MIN;
+                                else if (col == "avg") item.aggr = AggrFunc::AVG;
+                                i += 2; // skip func and '('
+                                item.column = to_lower(tokens[i++]);
+                                if (i >= tokens.size() || tokens[i++] != ")") throw std::runtime_error("Expected ')'");
+                            } else {
+                                item.column = col;
+                                i++;
+                            }
+                        } else {
+                            item.column = col;
+                            i++;
+                        }
+                        cmd.select_items.push_back(item);
+                    } else {
+                        i++;
                     }
-                    i++;
                 }
             }
             if (i >= tokens.size() || to_lower(tokens[i++]) != "from") throw std::runtime_error("Expected FROM keyword");
             cmd.table_name = to_lower(tokens[i++]);
+            
             parse_where(tokens, i, cmd);
+            
+            if (i < tokens.size() && to_lower(tokens[i]) == "group") {
+                i++;
+                if (i >= tokens.size() || to_lower(tokens[i++]) != "by") throw std::runtime_error("Expected BY after GROUP");
+                if (i >= tokens.size()) throw std::runtime_error("Expected column after GROUP BY");
+                cmd.group_by_column = to_lower(tokens[i++]);
+            }
         } else if (first == "alter") {
             if (tokens.size() < 4) throw std::runtime_error("Syntax error in ALTER statement");
             if (to_lower(tokens[1]) != "table") throw std::runtime_error("Expected TABLE after ALTER");
@@ -231,6 +264,7 @@ public:
                 std::string type_str = to_lower(tokens[5]);
                 if (type_str == "int") cmd.alter_col_type = DataType::INT;
                 else if (type_str == "string") cmd.alter_col_type = DataType::STRING;
+                else if (type_str == "float") cmd.alter_col_type = DataType::FLOAT;
                 else throw std::runtime_error("Unsupported data type: " + type_str);
             } else if (action == "drop") {
                 if (tokens.size() < 6 || to_lower(tokens[4]) != "column") throw std::runtime_error("Syntax error in ALTER TABLE DROP");

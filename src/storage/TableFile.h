@@ -38,10 +38,12 @@ public:
         
         for (size_t i = 0; i < row.values.size(); ++i) {
             const Value& val = row.values[i];
-            char type = val.type == DataType::INT ? 0 : 1;
+            char type = val.type == DataType::INT ? 0 : (val.type == DataType::STRING ? 1 : 2);
             file_.write(&type, 1);
             if (val.type == DataType::INT) {
                 file_.write(reinterpret_cast<const char*>(&val.int_val), sizeof(int));
+            } else if (val.type == DataType::FLOAT) {
+                file_.write(reinterpret_cast<const char*>(&val.float_val), sizeof(double));
             } else {
                 uint16_t len = val.str_val.length();
                 file_.write(reinterpret_cast<const char*>(&len), sizeof(uint16_t));
@@ -68,6 +70,10 @@ public:
             if (type == 0) {
                 int val;
                 file_.read(reinterpret_cast<char*>(&val), sizeof(int));
+                row.values.push_back(Value(val));
+            } else if (type == 2) {
+                double val;
+                file_.read(reinterpret_cast<char*>(&val), sizeof(double));
                 row.values.push_back(Value(val));
             } else {
                 uint16_t len;
@@ -105,6 +111,10 @@ public:
                 if (type == 0) {
                     int val;
                     file_.read(reinterpret_cast<char*>(&val), sizeof(int));
+                    row.values.push_back(Value(val));
+                } else if (type == 2) {
+                    double val;
+                    file_.read(reinterpret_cast<char*>(&val), sizeof(double));
                     row.values.push_back(Value(val));
                 } else {
                     uint16_t len;

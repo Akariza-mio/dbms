@@ -38,6 +38,13 @@ enum class AlterType {
     RENAME_COLUMN
 };
 
+enum class AggrFunc { NONE, COUNT, MAX, MIN, AVG };
+
+struct SelectItem {
+    AggrFunc aggr = AggrFunc::NONE;
+    std::string column;
+};
+
 struct WhereCondition {
     std::string column;
     OpType op = OpType::NONE;
@@ -56,7 +63,8 @@ struct SQLCommand {
     Vector<std::string> update_columns;
     Vector<Value> update_values;
     
-    Vector<std::string> select_columns; 
+    Vector<SelectItem> select_items; 
+    std::string group_by_column;
     
     Vector<WhereCondition> where_conds;
 

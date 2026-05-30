@@ -33,11 +33,20 @@ void test_parser() {
     // SELECT
     cmd = Parser::parse("select name from person where id = 1001");
     assert(cmd.type == CommandType::SELECT);
-    assert(cmd.select_columns[0] == "name");
+    assert(cmd.select_items[0].column == "name");
     assert(cmd.table_name == "person");
     assert(cmd.where_conds[0].column == "id");
     assert(cmd.where_conds[0].op == OpType::EQ);
     assert(cmd.where_conds[0].value.int_val == 1001);
+    
+    // SELECT AGGREGATE
+    cmd = Parser::parse("select count(id), max(age) from person group by gender");
+    assert(cmd.type == CommandType::SELECT);
+    assert(cmd.select_items[0].column == "id");
+    assert(cmd.select_items[0].aggr == AggrFunc::COUNT);
+    assert(cmd.select_items[1].column == "age");
+    assert(cmd.select_items[1].aggr == AggrFunc::MAX);
+    assert(cmd.group_by_column == "gender");
     
     // UPDATE
     cmd = Parser::parse("update person set name = \"mary\" where id = 1001");

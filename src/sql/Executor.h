@@ -125,7 +125,9 @@ public:
                         res += "- " + db->tables[i].name + " (";
                         for (size_t j = 0; j < db->tables[i].columns.size(); ++j) {
                             res += db->tables[i].columns[j].name + " ";
-                            res += (db->tables[i].columns[j].type == DataType::INT ? "int" : "string");
+                            if (db->tables[i].columns[j].type == DataType::INT) res += "int";
+                            else if (db->tables[i].columns[j].type == DataType::FLOAT) res += "float";
+                            else res += "string";
                             if (db->tables[i].columns[j].is_primary) res += " primary";
                             if (j < db->tables[i].columns.size() - 1) res += ", ";
                         }
@@ -188,7 +190,13 @@ public:
                     }
                     
                     Row r;
-                    r.values = cmd.insert_values;
+                    for (size_t i = 0; i < t->columns.size(); ++i) {
+                        Value v = cmd.insert_values[i];
+                        if (t->columns[i].type == DataType::FLOAT && v.type == DataType::INT) {
+                            v = Value((double)v.int_val);
+                        }
+                        r.values.push_back(v);
+                    }
                     
                     int pk_idx = get_primary_col_index(t);
                     TableFile tf(get_table_path(cmd.table_name));
@@ -218,19 +226,45 @@ public:
                     if (!t) return "Error: Table does not exist.";
                     
                     Vector<int> proj_idx;
+                    Vector<AggrFunc> proj_aggr;
+                    Vector<std::string> proj_name;
                     Vector<size_t> proj_width;
-                    if (cmd.select_columns.size() == 1 && cmd.select_columns[0] == "*") {
+                    
+                    bool has_aggr = false;
+                    
+                    if (cmd.select_items.size() == 1 && cmd.select_items[0].column == "*") {
                         for (size_t i = 0; i < t->columns.size(); ++i) {
                             proj_idx.push_back(i);
-                            proj_width.push_back(t->columns[i].name.length() <= 8 ? 8 : 16);
+                            proj_aggr.push_back(AggrFunc::NONE);
+                            proj_name.push_back(t->columns[i].name);
                         }
                     } else {
-                        for (size_t i = 0; i < cmd.select_columns.size(); ++i) {
-                            int idx = get_col_index(t, cmd.select_columns[i]);
+                        for (size_t i = 0; i < cmd.select_items.size(); ++i) {
+                            int idx = get_col_index(t, cmd.select_items[i].column);
                             if (idx == -1) return "Error: Unknown column in select list.";
+                            if (cmd.select_items[i].aggr != AggrFunc::NONE) has_aggr = true;
+                            
+                            if (cmd.select_items[i].aggr == AggrFunc::MAX || cmd.select_items[i].aggr == AggrFunc::MIN || cmd.select_items[i].aggr == AggrFunc::AVG) {
+                                if (t->columns[idx].type != DataType::INT && t->columns[idx].type != DataType::FLOAT) {
+                                    return "Error: Aggregate function MAX/MIN/AVG only supports INT or FLOAT types.";
+                                }
+                            }
+                            
                             proj_idx.push_back(idx);
-                            proj_width.push_back(t->columns[idx].name.length() <= 8 ? 8 : 16);
+                            proj_aggr.push_back(cmd.select_items[i].aggr);
+                            
+                            std::string name = t->columns[idx].name;
+                            if (cmd.select_items[i].aggr == AggrFunc::COUNT) name = "count(" + name + ")";
+                            else if (cmd.select_items[i].aggr == AggrFunc::MAX) name = "max(" + name + ")";
+                            else if (cmd.select_items[i].aggr == AggrFunc::MIN) name = "min(" + name + ")";
+                            else if (cmd.select_items[i].aggr == AggrFunc::AVG) name = "avg(" + name + ")";
+                            proj_name.push_back(name);
                         }
+                    }
+                    if (!cmd.group_by_column.empty()) has_aggr = true;
+                    
+                    for (size_t i = 0; i < proj_idx.size(); ++i) {
+                        proj_width.push_back(proj_name[i].length() <= 8 ? 8 : 16);
                     }
                     
                     TableFile tf(get_table_path(cmd.table_name));
@@ -270,14 +304,95 @@ public:
                         }
                     }
                     
+                    Vector<Row> result_rows;
+                    if (has_aggr) {
+                        struct Group { Value key; Vector<Row> rows; };
+                        Vector<Group> groups;
+                        
+                        if (cmd.group_by_column.empty()) {
+                            Group g; g.key = Value(); g.rows = matched_rows;
+                            groups.push_back(g);
+                        } else {
+                            int gb_idx = get_col_index(t, cmd.group_by_column);
+                            if (gb_idx == -1) return "Error: Unknown column in GROUP BY.";
+                            
+                            for (size_t k = 0; k < matched_rows.size(); ++k) {
+                                Value key_val = matched_rows[k].values[gb_idx];
+                                bool found = false;
+                                for (size_t g = 0; g < groups.size(); ++g) {
+                                    if (groups[g].key == key_val) {
+                                        groups[g].rows.push_back(matched_rows[k]);
+                                        found = true; break;
+                                    }
+                                }
+                                if (!found) {
+                                    Group grp; grp.key = key_val; grp.rows.push_back(matched_rows[k]);
+                                    groups.push_back(grp);
+                                }
+                            }
+                        }
+                        
+                        for (size_t g = 0; g < groups.size(); ++g) {
+                            Row res_row;
+                            for (size_t p = 0; p < proj_idx.size(); ++p) {
+                                if (proj_aggr[p] == AggrFunc::NONE) {
+                                    if (!groups[g].rows.empty()) res_row.values.push_back(groups[g].rows[0].values[proj_idx[p]]);
+                                    else res_row.values.push_back(Value());
+                                } else if (proj_aggr[p] == AggrFunc::COUNT) {
+                                    res_row.values.push_back(Value((int)groups[g].rows.size()));
+                                } else {
+                                    if (groups[g].rows.empty()) {
+                                        res_row.values.push_back(Value(0));
+                                    } else {
+                                        double m_val = 0.0;
+                                        double sum = 0.0;
+                                        for (size_t r = 0; r < groups[g].rows.size(); ++r) {
+                                            Value v = groups[g].rows[r].values[proj_idx[p]];
+                                            double d = (v.type == DataType::INT) ? v.int_val : v.float_val;
+                                            if (r == 0) m_val = d;
+                                            if (proj_aggr[p] == AggrFunc::MAX && d > m_val) m_val = d;
+                                            if (proj_aggr[p] == AggrFunc::MIN && d < m_val) m_val = d;
+                                            sum += d;
+                                        }
+                                        if (proj_aggr[p] == AggrFunc::AVG) {
+                                            res_row.values.push_back(Value(sum / groups[g].rows.size()));
+                                        } else {
+                                            if (t->columns[proj_idx[p]].type == DataType::INT) res_row.values.push_back(Value((int)m_val));
+                                            else res_row.values.push_back(Value(m_val));
+                                        }
+                                    }
+                                }
+                            }
+                            result_rows.push_back(res_row);
+                        }
+                    } else {
+                        for (size_t k = 0; k < matched_rows.size(); ++k) {
+                            Row res_row;
+                            for (size_t p = 0; p < proj_idx.size(); ++p) {
+                                res_row.values.push_back(matched_rows[k].values[proj_idx[p]]);
+                            }
+                            result_rows.push_back(res_row);
+                        }
+                    }
+                    
                     for (size_t j = 0; j < proj_idx.size(); ++j) {
-                        size_t max_len = t->columns[proj_idx[j]].name.length();
-                        for (size_t i = 0; i < matched_rows.size(); ++i) {
+                        size_t max_len = proj_name[j].length();
+                        for (size_t k = 0; k < result_rows.size(); ++k) {
                             std::string val_str;
-                            if (matched_rows[i].values[proj_idx[j]].type == DataType::INT) {
-                                val_str = std::to_string(matched_rows[i].values[proj_idx[j]].int_val);
+                            if (result_rows[k].values[j].type == DataType::INT) {
+                                if (t->columns[proj_idx[j]].type == DataType::FLOAT || proj_aggr[j] == AggrFunc::AVG) {
+                                    char buf[32];
+                                    snprintf(buf, sizeof(buf), "%.3f", (double)result_rows[k].values[j].int_val);
+                                    val_str = buf;
+                                } else {
+                                    val_str = std::to_string(result_rows[k].values[j].int_val);
+                                }
+                            } else if (result_rows[k].values[j].type == DataType::FLOAT) {
+                                char buf[32];
+                                snprintf(buf, sizeof(buf), "%.3f", result_rows[k].values[j].float_val);
+                                val_str = buf;
                             } else {
-                                val_str = matched_rows[i].values[proj_idx[j]].str_val;
+                                val_str = result_rows[k].values[j].str_val;
                             }
                             if (val_str.length() > max_len) max_len = val_str.length();
                         }
@@ -291,28 +406,38 @@ public:
                     };
                     
                     std::string res;
-                    for (size_t i = 0; i < proj_idx.size(); ++i) {
-                        res += pad_str(t->columns[proj_idx[i]].name, proj_width[i]) + " | ";
+                    for (size_t k = 0; k < proj_idx.size(); ++k) {
+                        res += pad_str(proj_name[k], proj_width[k]) + " | ";
                     }
                     if (!proj_idx.empty()) {
                         res.pop_back(); res.pop_back(); res.pop_back();
                     }
                     res += "\n";
-                    for (size_t i = 0; i < proj_idx.size(); ++i) {
-                        res += std::string(proj_width[i], '-') + "-+-";
+                    for (size_t k = 0; k < proj_idx.size(); ++k) {
+                        res += std::string(proj_width[k], '-') + "-+-";
                     }
                     if (!proj_idx.empty()) {
                         res.pop_back(); res.pop_back(); res.pop_back();
                     }
                     res += "\n";
                     
-                    for (size_t i = 0; i < matched_rows.size(); ++i) {
+                    for (size_t k = 0; k < result_rows.size(); ++k) {
                         for (size_t j = 0; j < proj_idx.size(); ++j) {
                             std::string val_str;
-                            if (matched_rows[i].values[proj_idx[j]].type == DataType::INT) {
-                                val_str = std::to_string(matched_rows[i].values[proj_idx[j]].int_val);
+                            if (result_rows[k].values[j].type == DataType::INT) {
+                                if (t->columns[proj_idx[j]].type == DataType::FLOAT || proj_aggr[j] == AggrFunc::AVG) {
+                                    char buf[32];
+                                    snprintf(buf, sizeof(buf), "%.3f", (double)result_rows[k].values[j].int_val);
+                                    val_str = buf;
+                                } else {
+                                    val_str = std::to_string(result_rows[k].values[j].int_val);
+                                }
+                            } else if (result_rows[k].values[j].type == DataType::FLOAT) {
+                                char buf[32];
+                                snprintf(buf, sizeof(buf), "%.3f", result_rows[k].values[j].float_val);
+                                val_str = buf;
                             } else {
-                                val_str = matched_rows[i].values[proj_idx[j]].str_val;
+                                val_str = result_rows[k].values[j].str_val;
                             }
                             res += pad_str(val_str, proj_width[j]) + " | ";
                         }
@@ -321,7 +446,7 @@ public:
                         }
                         res += "\n";
                     }
-                    res += "(" + std::to_string(matched_rows.size()) + " rows)";
+                    res += "(" + std::to_string(result_rows.size()) + " rows)";
                     return res;
                 }
                 
@@ -463,7 +588,11 @@ public:
                             if (bpt) bpt->remove(all_rows[i].values[pk_idx]);
                             
                             for (size_t k = 0; k < set_col_indices.size(); ++k) {
-                                all_rows[i].values[set_col_indices[k]] = cmd.update_values[k];
+                                Value v = cmd.update_values[k];
+                                if (t->columns[set_col_indices[k]].type == DataType::FLOAT && v.type == DataType::INT) {
+                                    v = Value((double)v.int_val);
+                                }
+                                all_rows[i].values[set_col_indices[k]] = v;
                             }
                             
                             uint32_t new_off = tf.insert_row(all_rows[i]);
@@ -530,6 +659,8 @@ public:
                         for (size_t i = 0; i < all_rows.size(); ++i) {
                             if (cmd.alter_col_type == DataType::INT) {
                                 all_rows[i].values.push_back(Value(0));
+                            } else if (cmd.alter_col_type == DataType::FLOAT) {
+                                all_rows[i].values.push_back(Value(0.0));
                             } else {
                                 all_rows[i].values.push_back(Value(""));
                             }

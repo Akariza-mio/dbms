@@ -63,6 +63,25 @@ void test_executor() {
     res = exec.execute(Parser::parse("select age from person where id = 1003"));
     assert(res.find("20") != std::string::npos);
 
+    // ADD FLOAT COLUMN
+    res = exec.execute(Parser::parse("alter table person add score float"));
+    assert(res == "Column added successfully.");
+    res = exec.execute(Parser::parse("insert person values (1004, \"alice\", 25, 95.5)"));
+    assert(res == "Insert successful.");
+    res = exec.execute(Parser::parse("insert person values (1005, \"bob\", 25, 80.2)"));
+    assert(res == "Insert successful.");
+    
+    // Test MAX, MIN, AVG, COUNT
+    res = exec.execute(Parser::parse("select count(id), max(score), min(score), avg(score) from person where age = 25"));
+    assert(res.find("2") != std::string::npos);
+    assert(res.find("95.500") != std::string::npos);
+    assert(res.find("80.200") != std::string::npos);
+    assert(res.find("87.850") != std::string::npos);
+    
+    // Test GROUP BY
+    res = exec.execute(Parser::parse("select age, count(id), max(score) from person group by age"));
+    assert(res.find("95.500") != std::string::npos);
+
     // Default values check
     res = exec.execute(Parser::parse("select age from person where id = 1001"));
     assert(res.find("0") != std::string::npos); // Should be default 0
