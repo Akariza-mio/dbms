@@ -9,6 +9,7 @@
 #include <cstring>
 #include "sql/Parser.h"
 #include "sql/Executor.h"
+#include "storage/JsonSerializer.h"
 
 using namespace dbms;
 
@@ -18,7 +19,7 @@ void handle_client(int client_sock) {
     Executor executor; 
     char buffer[4096];
     
-    std::string greeting = "Welcome to MiniDBMS!\n";
+    std::string greeting = JsonWriter::ok("Welcome to MiniDBMS!") + "\n";
     send(client_sock, greeting.c_str(), greeting.length(), 0);
     
     while (true) {
@@ -42,17 +43,18 @@ void handle_client(int client_sock) {
         try {
             SQLCommand cmd = Parser::parse(sql);
             if (cmd.type == CommandType::EXIT) {
-                response = "Goodbye!\n";
+                response = JsonWriter::ok("Goodbye!") + "\n";
                 send(client_sock, response.c_str(), response.length(), 0);
                 break;
             }
-            
+
             std::lock_guard<std::mutex> lock(db_mutex);
             response = executor.execute(cmd);
+            response = JsonWriter::ok(response);
         } catch (const std::exception& e) {
-            response = std::string("Error: ") + e.what();
+            response = JsonWriter::error(e.what());
         }
-        
+
         response += "\n";
         send(client_sock, response.c_str(), response.length(), 0);
     }

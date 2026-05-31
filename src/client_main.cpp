@@ -5,6 +5,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include "storage/JsonSerializer.h"
+
+using namespace dbms;
 
 extern "C" {
 #include "linenoise.h"
@@ -38,11 +41,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    char buffer[4096];
+    char buffer[8192];
     std::memset(buffer, 0, sizeof(buffer));
     int bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0);
     if (bytes_read > 0) {
-        std::cout << buffer;
+        std::string raw(buffer);
+        JsonReader jr(raw);
+        std::cout << jr.get_string("msg") << std::endl;
     }
     
     while (true) {
@@ -70,8 +75,10 @@ int main(int argc, char* argv[]) {
             std::cout << "Server disconnected." << std::endl;
             break;
         }
-        
-        std::cout << buffer; 
+
+        std::string raw(buffer);
+        JsonReader jr(raw);
+        std::cout << jr.get_string("msg") << std::endl;
     }
     
     close(sock);
