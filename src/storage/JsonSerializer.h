@@ -103,7 +103,7 @@ private:
 // Minimal JSON parser for simple objects used in wire format
 class JsonReader {
 public:
-    JsonReader(const std::string& json) : json_(json), pos_(0) {}
+    JsonReader(const std::string& json) : json_(json) {}
 
     bool get_bool(const std::string& key, bool default_val = false) const {
         std::string val = get_raw(key);
