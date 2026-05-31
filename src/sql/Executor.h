@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <filesystem>
 #include <sys/stat.h>
 #include <cstdio>
 
@@ -94,8 +95,7 @@ public:
                     
                 case CommandType::DROP_DATABASE:
                     if (catalog_.drop_database(cmd.db_name)) {
-                        std::string cmd_rm = "rm -rf data/" + cmd.db_name;
-                        system(cmd_rm.c_str());
+                        std::filesystem::remove_all("data/" + cmd.db_name);
                         if (current_db_ == cmd.db_name) current_db_ = "";
                         return "Database dropped successfully.";
                     }

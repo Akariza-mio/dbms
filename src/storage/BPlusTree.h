@@ -50,6 +50,10 @@ private:
             
             pager_->write_page(new_root_id, root_page);
             root_page_id_ = new_root_id;
+            // Persist root_page_id to metadata page
+            char meta[PAGE_SIZE] = {0};
+            std::memcpy(meta, &root_page_id_, 4);
+            pager_->write_page(0, meta);
             return;
         }
 
@@ -87,18 +91,102 @@ private:
             pager_->write_page(parent_id, page);
         } else {
             // Split internal node
-            throw std::runtime_error("Internal node split not implemented to keep it simple, please use a larger page size or implement it.");
+            uint32_t new_page_id = pager_->allocate_page();
+            char new_page[PAGE_SIZE] = {0};
+            NodeHeader new_header = {false, 0, 0};
+
+            uint16_t split_point = header.num_keys / 2;
+            uint16_t orig_num_keys = header.num_keys;
+            Value split_key = Serializer::deserialize_value_fixed(page + BPLUS_HEADER_SIZE + 4 + split_point * BPLUS_ENTRY_SIZE);
+
+            // Determine which side the new key belongs to
+            bool key_left = key < split_key;
+
+            // Split current node into left (parent_id) and right (new_page_id)
+            // Left: entries 0..split_point-1, children 0..split_point, num_keys = split_point
+            // Right: child at (split_point+1) + entries split_point+1..orig_num_keys-1
+
+            // Copy right node's first child
+            std::memcpy(new_page + BPLUS_HEADER_SIZE,
+                       page + BPLUS_HEADER_SIZE + 4 + split_point * BPLUS_ENTRY_SIZE + BPLUS_KEY_SIZE,
+                       4);
+
+            uint16_t right_base_count = orig_num_keys - split_point - 1;
+            if (right_base_count > 0) {
+                std::memcpy(new_page + BPLUS_HEADER_SIZE + 4,
+                           page + BPLUS_HEADER_SIZE + 4 + (split_point + 1) * BPLUS_ENTRY_SIZE,
+                           right_base_count * BPLUS_ENTRY_SIZE);
+            }
+            new_header.num_keys = right_base_count;
+            write_header(new_page, new_header);
+
+            // Left node keeps split_point keys
+            header.num_keys = split_point;
+
+            // Insert new key+child into the correct half
+            if (key_left) {
+                // Insert into left node
+                uint16_t pos = 0;
+                while (pos < split_point) {
+                    Value k = Serializer::deserialize_value_fixed(page + BPLUS_HEADER_SIZE + 4 + pos * BPLUS_ENTRY_SIZE);
+                    if (key < k) break;
+                    pos++;
+                }
+                if (pos < split_point) {
+                    std::memmove(page + BPLUS_HEADER_SIZE + 4 + (pos + 1) * BPLUS_ENTRY_SIZE,
+                                page + BPLUS_HEADER_SIZE + 4 + pos * BPLUS_ENTRY_SIZE,
+                                (split_point - pos) * BPLUS_ENTRY_SIZE);
+                }
+                Serializer::serialize_value_fixed(key, page + BPLUS_HEADER_SIZE + 4 + pos * BPLUS_ENTRY_SIZE);
+                std::memcpy(page + BPLUS_HEADER_SIZE + 4 + pos * BPLUS_ENTRY_SIZE + BPLUS_KEY_SIZE, &child_page_id, 4);
+                header.num_keys = split_point + 1;
+            } else {
+                // Insert into right node
+                uint16_t rpos = 0;
+                while (rpos < right_base_count) {
+                    Value k = Serializer::deserialize_value_fixed(new_page + BPLUS_HEADER_SIZE + 4 + rpos * BPLUS_ENTRY_SIZE);
+                    if (key < k) break;
+                    rpos++;
+                }
+                if (rpos < right_base_count) {
+                    std::memmove(new_page + BPLUS_HEADER_SIZE + 4 + (rpos + 1) * BPLUS_ENTRY_SIZE,
+                                new_page + BPLUS_HEADER_SIZE + 4 + rpos * BPLUS_ENTRY_SIZE,
+                                (right_base_count - rpos) * BPLUS_ENTRY_SIZE);
+                }
+                Serializer::serialize_value_fixed(key, new_page + BPLUS_HEADER_SIZE + 4 + rpos * BPLUS_ENTRY_SIZE);
+                std::memcpy(new_page + BPLUS_HEADER_SIZE + 4 + rpos * BPLUS_ENTRY_SIZE + BPLUS_KEY_SIZE, &child_page_id, 4);
+                new_header.num_keys = right_base_count + 1;
+                write_header(new_page, new_header);
+            }
+
+            // Write both pages to disk
+            write_header(page, header);
+            pager_->write_page(parent_id, page);
+            pager_->write_page(new_page_id, new_page);
+
+            // Push split_key to parent
+            insert_into_internal(path, split_key, new_page_id);
         }
     }
 
 public:
     BPlusTree(Pager* pager, uint32_t root_page_id = 0) : pager_(pager), root_page_id_(root_page_id) {
         if (pager_->get_num_pages() == 0) {
-            root_page_id_ = pager_->allocate_page();
+            // page 0 = metadata (stores root_page_id), page 1 = root leaf
+            pager_->allocate_page(); // page 0
+            root_page_id_ = pager_->allocate_page(); // page 1
+            char meta[PAGE_SIZE] = {0};
+            std::memcpy(meta, &root_page_id_, 4);
+            pager_->write_page(0, meta);
             char page[PAGE_SIZE] = {0};
             NodeHeader header = {true, 0, 0};
             write_header(page, header);
             pager_->write_page(root_page_id_, page);
+        } else {
+            // Read root_page_id from metadata page
+            char meta[PAGE_SIZE];
+            pager_->read_page(0, meta);
+            std::memcpy(&root_page_id_, meta, 4);
         }
     }
 

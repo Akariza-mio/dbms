@@ -6,11 +6,11 @@
 
 ## 🌟 核心特性 (Core Features)
 
-1. **Client-Server 架构**：通过原生的 Socket TCP 和多线程技术，支持多客户端同时接入并发操作。内置了线程互斥锁保证底层文件系统读写安全。
+1. **Client-Server 架构**：通过原生的 Socket TCP 和多线程技术，支持多客户端同时接入并发操作。内置了线程互斥锁保证底层文件系统读写安全。通信协议采用 JSON 格式，客户端可明确区分成功/失败响应。
 2. **纯自研底层引擎**：
-   - **核心结构**：自主实现了轻量级的 `Vector` 动态数组与 `String` 字符串类，脱离了对 `std::vector` 的重度依赖。
+   - **核心结构**：自主实现了轻量级的 `Vector` 动态数组，脱离了对 `std::vector` 的重度依赖。
    - **存储引擎**：基于页（Page）的行式存储系统，将数据通过二进制格式（`.dat`）紧凑序列化到本地硬盘。
-   - **索引机制**：实现了基于磁盘的 **B+树（BPlusTree）** 索引引擎，为表的主键提供高速的点查能力。
+   - **索引机制**：实现了基于磁盘的 **B+树（BPlusTree）** 索引引擎，为表的主键提供高速的点查能力，支持内部节点分裂和根节点 ID 持久化。
 3. **丰富的 SQL 支持**：
    - **数据定义 (DDL)**：支持 `CREATE DATABASE`, `CREATE TABLE`，以及强大的 `ALTER TABLE`（支持增删列、重命名表、重命名列）。
    - **数据操作 (DML)**：支持 `INSERT`, `DELETE`, `UPDATE`。
@@ -35,19 +35,19 @@
 本数据库严格遵循模块化设计原则：
 
 ```text
-/~/dbms
+dbms
 ├── build/                # CMake 编译生成的构建目录（可执行文件位于此）
 ├── data/                 # 数据库落盘文件目录
 │   ├── catalog.meta      # 整个系统的元数据（记录了有哪些库和表）
 │   ├── *.dat             # 表的二进制行数据存储文件
 │   └── *.idx             # B+树主键索引文件
 ├── src/                  # 核心源代码
-│   ├── core/             # 基础支撑层：Types.h, Vector.h, String.h
-│   ├── storage/          # 存储层：Pager, TableFile, BPlusTree
-│   ├── sql/              # 逻辑层：Parser 解析器, Executor 执行引擎, AST 抽象语法树
-│   └── server_main.cpp   # 服务端主入口（监听端口、分发线程）
-├── client/               # 客户端源码
-│   └── client_main.cpp   # 交互式 CLI 客户端入口
+│   ├── client_main.cpp   # 交互式 CLI 客户端入口
+│   ├── server_main.cpp   # 服务端主入口（监听端口、分发线程）
+│   ├── linenoise.c/.h    # 命令行编辑库（提供历史记录、行编辑功能）
+│   ├── core/             # 基础支撑层：Types.h, Vector.h
+│   ├── storage/          # 存储层：Pager, TableFile, BPlusTree, JsonSerializer
+│   └── sql/              # 逻辑层：Parser 解析器, Executor 执行引擎, AST 抽象语法树
 ├── tests/                # 单元测试与集成测试模块
 ├── CMakeLists.txt        # 项目构建脚本
 └── config.md             # 本项目的配置与说明文档
@@ -70,17 +70,38 @@ make -j4
 服务端进程是整个 DBMS 的大脑，负责处理数据和管理文件。
 ```bash
 cd build
-./server 8080
+./server [port]
 ```
-- **说明**：服务端将在前台挂起并默认监听 `8080` 端口。`8080` 可替换为您想要的任何端口号。
+- **说明**：服务端将在前台挂起并监听指定端口。`port` 为可选参数，默认为 `8080`。如 `./server` 监听 8080，`./server 9090` 监听 9090。
 
 ### 3. 启动客户端 (Client)
 打开一个**新的终端窗口**，运行客户端程序去连接服务端：
 ```bash
 cd build
-./client 127.0.0.1 8080
+./client [ip] [port]
 ```
-- **说明**：参数一为服务端的 IP（`127.0.0.1` 表示连接本机的服务端），参数二为端口号。连接成功后，您将进入 `MiniDBMS >` 交互界面。
+- **说明**：`ip` 和 `port` 均为可选参数，默认连接 `127.0.0.1:8080`。如 `./client` 连接本机 8080，`./client 192.168.1.2 9090` 连接指定地址。
+
+### 4. 交互式使用
+- 使用上下方向键浏览历史命令
+- 输入 `exit` 或 `quit` 退出客户端
+- 服务端使用 `Ctrl+C` 关闭
+
+---
+
+## 🔌 通信协议
+
+客户端与服务端之间通过 JSON 格式交换消息：
+
+```text
+请求：客户端发送原始 SQL 文本
+响应：{"ok":true,"msg":"Insert successful."}
+      {"ok":false,"msg":"Error: Table does not exist."}
+```
+
+- `ok`：布尔值，表示操作是否成功
+- `msg`：字符串，包含结果信息或错误描述
+- 客户端根据 `ok` 自动显示 `OK` 或 `ERROR` 前缀
 
 ---
 
@@ -116,6 +137,18 @@ exit
 ## 🧪 测试说明
 
 如需对数据库底层结构进行二次开发，我们在项目中内置了一套完备的测试驱动模块。您可以在 `build` 目录下单独运行：
-- `./tests/test_core`：验证自定义 `Vector` 和 `String` 的内存正确性。
-- `./tests/test_storage`：验证底层的二进制落盘与页管理逻辑。
-- `./tests/test_parser` 和 `./tests/test_executor`：验证 SQL 解析的边界情况与业务执行正确性。
+
+```bash
+cd build
+./tests/test_core        # 验证自定义 Vector 的内存正确性
+./tests/test_storage     # 验证底层的二进制落盘与页管理逻辑
+./tests/test_bptree      # 验证 B+树索引的插入、查询、删除、分裂
+./tests/test_parser      # 验证 SQL 解析的边界情况
+./tests/test_executor    # 验证完整的 SQL 执行链路（DDL/DML/DQL）
+```
+
+额外提供了关键缺陷回归测试（验证修复是否生效）：
+
+```bash
+g++ -std=c++20 -Isrc -o /tmp/test_critical tests/test_critical.cpp && /tmp/test_critical
+```
