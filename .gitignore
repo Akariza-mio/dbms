@@ -1,0 +1,8 @@
+build/
+
+.vscode/
+
+data/
+*.dat
+*.idx
+*.meta
