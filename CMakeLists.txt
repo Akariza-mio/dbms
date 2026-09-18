@@ -12,6 +12,9 @@ endif()
 add_library(minidbms_core
     src/core/value.cpp
     src/core/column.cpp
+    src/core/row.cpp
+    src/core/table.cpp
+    src/core/database.cpp
 )
 
 # 允许链接 minidbms_core 的目标使用形如 "core/value.hpp" 的包含路径
