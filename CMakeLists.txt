@@ -15,6 +15,7 @@ add_library(minidbms_core
     src/core/row.cpp
     src/core/table.cpp
     src/core/database.cpp
+    src/core/catalog.cpp
 )
 
 # 允许链接 minidbms_core 的目标使用形如 "core/value.hpp" 的包含路径
