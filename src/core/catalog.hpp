@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/database.hpp"
+#include <filesystem>
 #include <vector>
 #include <string>
 #include <optional>
@@ -23,6 +24,9 @@ public:
     void drop_table(const std::string& db_name,const std::string& table_name);
     [[nodiscard]] Table& get_table(const std::string& db_name,const std::string& table_name);
     [[nodiscard]] const Table& get_table(const std::string& db_name,const std::string& table_name) const;
+
+    void save_to_file(const std::filesystem::path& path) const;
+    [[nodiscard]] static Catalog load_from_file(const std::filesystem::path& path);
 private:
     std::vector<Database> databases_;
 };
