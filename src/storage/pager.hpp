@@ -17,8 +17,11 @@ public:
     Pager& operator=(const Pager& other) = delete;
 
     [[nodiscard]] PageId get_page_cnt() const noexcept;
+    // read the page
     [[nodiscard]] Page read_page(PageId page_id);
-    void write_page(PageId get_id,const Page& page);
+    //cover the page 
+    void write_page(PageId page_id,const Page& page);
+    //allocate a new page
     [[nodiscard]] PageId allocate_page();
 private:
     std::filesystem::path path_;
