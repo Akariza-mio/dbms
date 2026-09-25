@@ -5,6 +5,7 @@
 #include <bit>
 #include <string>
 #include <utility>
+#include <limits>
 
 namespace minidb::serialization{
     namespace{
@@ -88,19 +89,18 @@ namespace minidb::serialization{
                     }
                     std::string str;
                     str.reserve(len_sizet);
-                    for(std::uint32_t i = 0; i < len_sizet; ++i){
+                    for(std::size_t i = 0; i < len_sizet; ++i){
                         str.push_back(static_cast<char>(read_u8(input,offset)));
                     }
-                    return Value(str);
+                    return Value(std::move(str));
                 }
                 default:
                     throw std::invalid_argument("Unknown ValueTag");
             }
         }
-    }
-    byte_vector serialize_value(const Value& value){
-        byte_vector output;
-        switch(value.get_type()){
+        //append a value to the byte file
+        void append_value(byte_vector& output,const Value& value){
+            switch(value.get_type()){
             case DataType::INT:{
                 append_u8(output,static_cast<std::uint8_t>(ValueTag::INT));
                 const std::uint32_t bits = std::bit_cast<std::uint32_t>(value.as_int());
@@ -123,9 +123,15 @@ namespace minidb::serialization{
                 }
                 break;
             }   
+            }
         }
+    }
+    byte_vector serialize_value(const Value& value){
+        byte_vector output;
+        append_value(output,value);
         return output;
     }
+    //actually it is a read_value with extra check
     Value deserialize_value(const byte_vector& bytes){
         std::size_t offset = 0;
         Value value = read_value(bytes, offset);
@@ -136,5 +142,35 @@ namespace minidb::serialization{
             );
         }
         return value;
+    }
+    byte_vector serialize_row(const Row& row){
+        if (row.get_size() > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::length_error("Row contains too many values");
+        }
+        byte_vector output;
+        append_u32(output, static_cast<std::uint32_t>(row.get_size()));
+        for(const Value& value : row.get_values()){
+            append_value(output,value);
+        }
+        return output;
+    }
+    //several read_value with extra check
+    Row deserialize_row(const byte_vector& bytes){
+        std::size_t offset = 0;
+        const std::uint32_t values_cnt = read_u32(bytes, offset);
+        const std::size_t cnt = static_cast<std::size_t>(values_cnt);
+        constexpr std::size_t MIN_VALUE_SIZE = 5;
+        if(cnt > (bytes.size() - offset) / MIN_VALUE_SIZE){
+            throw std::runtime_error("invalid value count in serialized Row");
+        }
+        std::vector<Value> values;
+        values.reserve(cnt);
+        for(std::size_t i = 0; i < cnt; ++i){
+            values.push_back(read_value(bytes, offset));
+        }
+        if (offset != bytes.size()) {
+            throw std::runtime_error("Extra bytes after serialized Row");
+        }
+        return Row(std::move(values));
     }
 }
