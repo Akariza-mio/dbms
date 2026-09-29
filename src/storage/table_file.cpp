@@ -4,6 +4,7 @@
 #include <system_error>
 #include <array>
 #include <limits>
+#include <utility>
 
 namespace minidb{
     TableFile::TableFile(const std::filesystem::path& path)
@@ -107,5 +108,114 @@ namespace minidb{
             throw std::runtime_error("Failed to read complete row payload");
         }
         return serialization::deserialize_row(payload);
+    }
+    void TableFile::delete_row(Row_offset offset){
+        std::error_code error;
+        const std::uintmax_t file_size = std::filesystem::file_size(path_,error);
+        if(error){
+            throw std::runtime_error("Failed to get the size of the table file: " + path_.string());
+        }
+        //check if the offset is valid
+        if(offset > file_size || HEADER_SIZE > file_size - offset){
+            throw std::out_of_range("Row offset is out of range");
+        }
+        if(offset > static_cast<Row_offset>(std::numeric_limits<std::streamoff>::max())){
+            throw std::out_of_range("Row offset is too large");
+        }
+        //move the pointer to the offset of the row
+        fs.seekg(static_cast<std::streamoff>(offset),std::ios::beg);
+        if(!fs){
+            throw std::runtime_error("Failed to seek to the row header: " + path_.string());
+        }
+        //read the header in file to array
+        std::array<std::byte,HEADER_SIZE> header{};
+        const std::streamsize header_size = static_cast<std::streamsize>(header.size());
+        fs.read(reinterpret_cast<char*>(header.data()),header_size);
+        if(!fs || fs.gcount() != header_size){
+            throw std::runtime_error("Failed to read complete row header");
+        }
+        const std::uint8_t flag = std::to_integer<std::uint8_t>(header[0]);
+        if(flag == DELETED){
+            throw std::runtime_error("Row is already deleted");
+        }
+        if(flag != ACTIVE){
+            throw std::runtime_error("Invalid row flag");
+        }
+        std::uint32_t payload_size = 0;
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            const std::uint32_t current = std::to_integer<std::uint8_t>(header[1 + i]);
+            payload_size |= current << (i * 8);
+        }
+        //check if the payload size is valid
+        const std::uintmax_t payload_offset = static_cast<std::uintmax_t>(offset) + HEADER_SIZE;
+        if(payload_size > file_size - payload_offset){
+            throw std::runtime_error("cannot delete truncated row");
+        }
+        //write the first byte
+        fs.seekp(static_cast<std::streamoff>(offset),std::ios::beg);
+        if(!fs){
+            throw std::runtime_error("Failed to seek to the row header for deletion: " + path_.string());   
+        }
+        const std::byte tomb = static_cast<std::byte>(DELETED);
+        fs.write(reinterpret_cast<const char*>(&tomb),1);
+        fs.flush();
+        if(!fs){
+            throw std::runtime_error("Failed to mark row as deleted: " + path_.string());
+        }
+    }
+    std::vector<TableFile::row_entry> TableFile::scan_all_rows(){
+        Row_offset offset = 0;
+        std::vector<row_entry> res;
+        std::error_code error;
+        const std::uintmax_t file_size = std::filesystem::file_size(path_,error);
+        if(error){
+            throw std::runtime_error("Failed to get the size of the table file: " + path_.string());
+        }
+        while(offset < file_size){
+            //check if the offset is valid
+            if(offset > file_size || HEADER_SIZE > file_size - offset){
+                throw std::runtime_error("Truncated row header");
+            }
+            if(offset > static_cast<Row_offset>(std::numeric_limits<std::streamoff>::max())){
+                throw std::out_of_range("Row offset is too large");
+            }
+            //read the header in file to array
+            fs.seekg(static_cast<std::streamoff>(offset),std::ios::beg);
+            if(!fs){
+                throw std::runtime_error("Failed to seek to the row header: " + path_.string());
+            }
+            std::array<std::byte,HEADER_SIZE> header{};
+            const std::streamsize header_size = static_cast<std::streamsize>(header.size());
+            fs.read(reinterpret_cast<char*>(header.data()),header_size);
+            if(!fs || fs.gcount() != header_size){
+                throw std::runtime_error("Failed to read complete row header");
+            }
+            const std::uint8_t flag = std::to_integer<std::uint8_t>(header[0]);
+            if(flag != ACTIVE && flag != DELETED){
+                throw std::runtime_error("Invalid row flag");
+            }
+            std::uint32_t payload_size = 0;
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                const std::uint32_t current = std::to_integer<std::uint8_t>(header[1 + i]);
+                payload_size |= current << (i * 8);
+            }
+            const std::uintmax_t payload_offset = static_cast<std::uintmax_t>(offset) + HEADER_SIZE;
+            if(payload_size > file_size - payload_offset){
+                throw std::runtime_error("Truncated row payload");
+            }
+            //read the row payload
+            if(flag == ACTIVE){
+                serialization::byte_vector payload(payload_size);
+                const std::streamsize payload_size_stream = static_cast<std::streamsize>(payload.size());
+                fs.read(reinterpret_cast<char*>(payload.data()),payload_size_stream);
+                if(!fs || fs.gcount() != payload_size_stream){
+                    throw std::runtime_error("Failed to read complete row payload");
+                }
+                Row row = serialization::deserialize_row(payload);
+                res.push_back({offset,std::move(row)});
+            }
+            offset = static_cast<Row_offset>(payload_offset + payload_size);
+        }
+        return res;
     }
 }
