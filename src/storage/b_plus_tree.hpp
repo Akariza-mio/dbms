@@ -26,7 +26,7 @@ private:
     //meta data of idx is page 0
     static constexpr PageId META_PAGE_ID = 0;
     //key slot size 
-    static constexpr std::size_t KEY_SLOT_SIZE = 258;
+    static constexpr std::size_t KEY_SLOT_SIZE = sizeof(std::uint16_t) + Value::MAX_STRING_LENGTH;
     //entry size = key slot size + row offset or child page id size
     static constexpr std::size_t ENTRY_SIZE = KEY_SLOT_SIZE + sizeof(std::uint64_t);
     //max keys is 15
