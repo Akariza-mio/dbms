@@ -7,6 +7,7 @@
 #include <array>
 #include <filesystem>
 #include <limits>
+#include <optional>
 
 namespace minidb{
 class BPlusTree{
@@ -18,6 +19,9 @@ public:
     BPlusTree& operator=(const BPlusTree& other) = delete;
     [[nodiscard]] PageId get_root_page_id() const noexcept;
     [[nodiscard]] DataType get_keytype() const noexcept;
+    
+    [[nodiscard]] std::optional<row_offset> search(const Value& key);
+    void insert(const Value& key,row_offset offset);
 private:
     //sign of invalid page
     static constexpr PageId INVALID_PAGE_ID = std::numeric_limits<PageId>::max();
@@ -65,5 +69,18 @@ private:
 
     void write_node_header(Pager::Page& page,const NodeHeader& header) const;
     [[nodiscard]] NodeHeader read_node_header(const Pager::Page& page) const;
+
+    //get the where the index-th entry begins
+    [[nodiscard]] std::size_t entry_offset(std::size_t index) const;
+    //get a key slot from the page at the given index
+    [[nodiscard]] KeySlot read_key_slot(const Pager::Page& page,std::size_t index) const;
+    //write a key slot to the page at the given index
+    void write_key_slot(Pager::Page& page,std::size_t index,const KeySlot& slot) const;
+    //get the row offset after the key slot
+    [[nodiscard]] row_offset read_leaf_row_offset(const Pager::Page& page,std::size_t index) const;
+    //write the key and row offset to the page at the given index
+    void write_leaf_entry(Pager::Page& page,std::size_t index,const Value& key,row_offset offset) const;
+    //find the key position
+    [[nodiscard]] std::size_t find_leaf_position(const Pager::Page& page,std::uint16_t key_cnt,const Value& key) const;
 };
 }

@@ -389,4 +389,112 @@ namespace minidb{
                 load_metadata();    
             }
         }
+    std::size_t BPlusTree::entry_offset(std::size_t index) const{
+        if(index >= MAX_KEYS){
+            throw std::out_of_range("B+ tree entry index out of range");
+        }
+        return NODE_HEADER_SIZE + index * ENTRY_SIZE;
+    }
+    BPlusTree::KeySlot BPlusTree::read_key_slot(const Pager::Page& page,std::size_t index) const{
+        const std::size_t offset = entry_offset(index);
+        check_page_range(page,offset,KEY_SLOT_SIZE);
+        KeySlot slot{};
+        //copy bytes from page to key slot
+        for(std::size_t i = 0; i < KEY_SLOT_SIZE; ++i){
+            slot[i] = page[offset + i];
+        }
+        return slot;
+    }
+    void BPlusTree::write_key_slot(Pager::Page& page,std::size_t index,const KeySlot& slot) const{
+        const std::size_t offset = entry_offset(index);
+        check_page_range(page,offset,KEY_SLOT_SIZE);
+        //copy bytes from key slot to page
+        for(std::size_t i = 0; i < KEY_SLOT_SIZE; ++i){
+            page[offset + i] = slot[i];
+        }
+    }
+    BPlusTree::row_offset BPlusTree::read_leaf_row_offset(const Pager::Page& page,std::size_t index) const{
+        const std::size_t offset = entry_offset(index) + KEY_SLOT_SIZE;
+        return read_u64(page,offset);
+    }
+    void BPlusTree::write_leaf_entry(Pager::Page& page,std::size_t index,const Value& key,row_offset offset) const{
+        const KeySlot slot = encode_key(key);
+        write_key_slot(page,index,slot);
+        write_u64(page,entry_offset(index) + KEY_SLOT_SIZE,offset);
+    }
+    std::size_t BPlusTree::find_leaf_position(const Pager::Page& page,std::uint16_t key_cnt,const Value& key) const{
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        if(key_cnt > MAX_KEYS){
+            throw std::invalid_argument("key count exceeds maximum in B+ tree node");
+        }
+        std::size_t l = 0, r = key_cnt;
+        while(l < r){
+            const std::size_t mid = (l + r) / 2;
+            const Value mid_key = decode_key(read_key_slot(page,mid));
+            if(mid_key < key){
+                l = mid + 1;
+            }else{
+                r = mid;
+            }
+        }
+        //return the first position that the key is >= the given key
+        return l;
+    }
+    std::optional<BPlusTree::row_offset> BPlusTree::search(const Value& key){
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        //now only support single-level B+ tree search
+        const Page root_page = pager_.read_page(root_page_id);
+        const NodeHeader root_header = read_node_header(root_page);
+        if(root_header.type != NodeType::LEAF) {
+            throw std::logic_error("Multi-level B+ tree search is not implemented yet");
+        }
+        const std::size_t pos = find_leaf_position(root_page,root_header.key_cnt,key);
+        if(pos >= root_header.key_cnt){
+            return std::nullopt;
+        }
+        const Value stored_key = decode_key(read_key_slot(root_page,pos));
+        if(stored_key != key){
+            return std::nullopt;
+        }
+        return read_leaf_row_offset(root_page,pos);
+    }
+    void BPlusTree::insert(const Value& key,row_offset offset){
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        Page root_page = pager_.read_page(root_page_id);
+        NodeHeader root_header = read_node_header(root_page);
+        //now only support single-level B+ tree insert
+        if(root_header.type != NodeType::LEAF){
+            throw std::logic_error("Multi-level B+ tree insert is not implemented yet");
+        }
+        const std::size_t pos = find_leaf_position(root_page,root_header.key_cnt,key);
+        if(pos < root_header.key_cnt){
+            const Value stored_key = decode_key(read_key_slot(root_page,pos));
+            if(stored_key == key){
+                throw std::invalid_argument("duplicate key insertion");
+            }
+        }
+        //leaf node splitting will be implemented here later
+        if(root_header.key_cnt >= MAX_KEYS){
+            throw std::overflow_error("B+ tree node is full, splitting is not implemented yet");
+        }
+        //move entries after pos to the right to make space for new entry
+        for(std::size_t destination = root_header.key_cnt; destination > pos; --destination){
+            const std::size_t source_offset = entry_offset(destination - 1);
+            const std::size_t destination_offset = entry_offset(destination);
+            for(std::size_t i = 0; i < ENTRY_SIZE; ++i){
+                root_page[destination_offset + i] = root_page[source_offset + i];
+            }
+        }
+        //add new entry at pos
+        write_leaf_entry(root_page,pos,key,offset);
+        ++root_header.key_cnt;
+        write_node_header(root_page,root_header);
+        pager_.write_page(root_page_id,root_page);
+    }
 }
