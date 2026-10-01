@@ -334,20 +334,59 @@ namespace minidb{
         const Page root_page = pager_.read_page(new_root_page_id);
         const NodeHeader root_header = read_node_header(root_page);
         if(root_header.parent_page_id != INVALID_PAGE_ID){
-            throw std::logic_error("root node should not have parent page id");
+            throw std::runtime_error("root node should not have parent page id");
         }
         if(root_header.type == NodeType::LEAF){
             if(root_header.next_leaf_page_id != INVALID_PAGE_ID){
-                throw std::logic_error("root leaf node should not have next leaf page id");
+                throw std::runtime_error("root leaf node should not have next leaf page id");
             }
         }else{
             if(root_header.key_cnt == 0){
                 throw std::runtime_error("internal node should have at least one key");
             }
             if(root_header.first_child_page_id == INVALID_PAGE_ID || root_header.first_child_page_id == META_PAGE_ID || root_header.first_child_page_id >= page_cnt){
-                throw std::logic_error("internal node have valid first child page id");
+                throw std::runtime_error("internal node have valid first child page id");
             }
         }
         root_page_id = new_root_page_id;
     }
+    void BPlusTree::init_empty_tree(){
+        if(pager_.get_page_cnt() != 0){
+            throw std::logic_error("B+ tree index file is not empty, cannot initialize empty tree");
+        }
+        //allocate metadata page and root page
+        const PageId meta_page_id = pager_.allocate_page();
+        if(meta_page_id != META_PAGE_ID){
+            throw std::logic_error("B+ tree metadata page id is not 0");
+        }
+        const PageId new_root_page_id = pager_.allocate_page();
+        if(new_root_page_id != 1){
+            throw std::logic_error("first B+ tree root page id must be 1");
+        }
+        //writr root first and then write metadata
+        Page root_page{};
+        NodeHeader root_header{NodeType::LEAF,0,INVALID_PAGE_ID,INVALID_PAGE_ID,INVALID_PAGE_ID};
+        write_node_header(root_page,root_header);
+        pager_.write_page(new_root_page_id,root_page);
+        root_page_id = new_root_page_id;
+        write_metadata();
+    }
+    //constructor
+    BPlusTree::BPlusTree(const std::filesystem::path& path,DataType key_type)
+        :pager_(path),key_type_(key_type){
+            switch(key_type_){
+                case DataType::INT:
+                case DataType::STRING:
+                    break;
+                case DataType::FLOAT:
+                    throw std::invalid_argument("float key type is not supported in B+ tree");
+                default:
+                    throw std::invalid_argument("unsupported key type in B+ tree");
+            }
+            if(pager_.get_page_cnt() == 0){
+                init_empty_tree();
+            }else{
+                load_metadata();    
+            }
+        }
 }
