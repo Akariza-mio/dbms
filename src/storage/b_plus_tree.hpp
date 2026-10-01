@@ -51,7 +51,7 @@ private:
     };
     Pager pager_;
     DataType key_type_;
-    PageId root_page_id_ = INVALID_PAGE_ID;
+    PageId root_page_id = INVALID_PAGE_ID;
     //create page 0 and empty root page
     void init_empty_tree();
     void load_metadata();

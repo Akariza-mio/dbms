@@ -15,6 +15,7 @@ namespace minidb{
         constexpr std::size_t META_MAGIC_OFFSET = 0;
         constexpr std::size_t META_VERSION_OFFSET = 4;
         constexpr std::size_t META_KEY_TYPE_OFFSET = 8;
+        constexpr std::size_t META_RESERVED_BEGIN = 9;
         constexpr std::size_t META_ROOT_PAGE_ID_OFFSET = 16;
         constexpr std::size_t META_PAGE_SIZE_OFFSET = 24;
         constexpr std::size_t META_KEY_SLOT_SIZE_OFFSET = 28;
@@ -90,7 +91,7 @@ namespace minidb{
         }
     }
     BPlusTree::PageId BPlusTree::get_root_page_id() const noexcept{
-        return root_page_id_;
+        return root_page_id;
     }
     DataType BPlusTree::get_keytype() const noexcept{
         return key_type_;
@@ -251,5 +252,102 @@ namespace minidb{
             default:
                 throw std::invalid_argument("unsupported key type in B+ tree");
         }
+    }
+    void BPlusTree::write_metadata(){
+        //check root page id and key type
+        if(pager_.get_page_cnt() == 0){
+            throw std::logic_error("B+ tree metadata page is not allocated");
+        }
+        if(root_page_id == INVALID_PAGE_ID || root_page_id == META_PAGE_ID || root_page_id >= pager_.get_page_cnt()){
+            throw std::logic_error("B+ tree root page id is invalid");
+        }
+        std::uint8_t key_type_tag = 0;
+        switch(key_type_){
+            case DataType::INT:
+                key_type_tag = static_cast<uint8_t>(KeyTypeFlag::INT);
+                break;
+            case DataType::STRING:
+                key_type_tag = static_cast<uint8_t>(KeyTypeFlag::STRING);
+                break;
+            case DataType::FLOAT:
+                throw std::logic_error("float key type is not supported in B+ tree");
+            default:
+                throw std::logic_error("unsupported key type in B+ tree");
+        }
+        Page metadata{};
+        //rebuild and overwrite metadata page
+        write_u32(metadata,META_MAGIC_OFFSET,META_MAGIC);
+        write_u32(metadata,META_VERSION_OFFSET,FORMAT_VERSION);
+        write_u8(metadata,META_KEY_TYPE_OFFSET,key_type_tag);
+        write_u64(metadata,META_ROOT_PAGE_ID_OFFSET,root_page_id);
+        write_u32(metadata,META_PAGE_SIZE_OFFSET,static_cast<std::uint32_t>(Pager::PAGESIZE));
+        write_u32(metadata,META_KEY_SLOT_SIZE_OFFSET,static_cast<std::uint32_t>(KEY_SLOT_SIZE));
+        pager_.write_page(META_PAGE_ID,metadata);
+    }
+    void BPlusTree::load_metadata(){
+        const PageId page_cnt = pager_.get_page_cnt();
+        if(page_cnt < 2){
+            throw std::runtime_error("B+ tree index file does not contain metadata and root page");
+        }
+        //read metadata page
+        const Page metadata = pager_.read_page(META_PAGE_ID);
+        //several checks
+        if(read_u32(metadata,META_MAGIC_OFFSET) != META_MAGIC){
+            throw std::runtime_error("invalid B+ tree metadata magic");
+        }
+        if(read_u32(metadata,META_VERSION_OFFSET) != FORMAT_VERSION){
+            throw std::runtime_error("unsupported B+ tree metadata version");
+        }
+        for(std::size_t i = META_RESERVED_BEGIN; i < META_ROOT_PAGE_ID_OFFSET; ++i){
+            if(metadata[i] != std::byte{0}){
+                throw std::runtime_error("invalid B+ tree metadata reserved byte");
+            }
+        }
+        if(read_u32(metadata,META_PAGE_SIZE_OFFSET) != static_cast<std::uint32_t>(Pager::PAGESIZE)){
+            throw std::runtime_error("B+ tree metadata page size does not match");
+        }
+        if(read_u32(metadata,META_KEY_SLOT_SIZE_OFFSET) != static_cast<std::uint32_t>(KEY_SLOT_SIZE)){
+            throw std::runtime_error("B+ tree metadata key slot size does not match");
+        }
+        //get key type
+        const std::uint8_t key_type_tag = read_u8(metadata,META_KEY_TYPE_OFFSET);
+        DataType type_value;
+        switch(key_type_tag){
+            case 1:
+                type_value = DataType::INT;
+                break;
+            case 2:
+                type_value = DataType::STRING;
+                break;
+            default:
+                throw std::runtime_error("invalid B+ tree key type");
+        }
+        if(type_value != key_type_){
+            throw std::runtime_error("B+ tree key type does not match");
+        }
+        //get root page id and check
+        const PageId new_root_page_id = read_u64(metadata,META_ROOT_PAGE_ID_OFFSET);
+        if(new_root_page_id == INVALID_PAGE_ID || new_root_page_id == META_PAGE_ID || new_root_page_id >= page_cnt){
+            throw std::runtime_error("B+ tree root page id is invalid");
+        }
+        //get root page and check
+        const Page root_page = pager_.read_page(new_root_page_id);
+        const NodeHeader root_header = read_node_header(root_page);
+        if(root_header.parent_page_id != INVALID_PAGE_ID){
+            throw std::logic_error("root node should not have parent page id");
+        }
+        if(root_header.type == NodeType::LEAF){
+            if(root_header.next_leaf_page_id != INVALID_PAGE_ID){
+                throw std::logic_error("root leaf node should not have next leaf page id");
+            }
+        }else{
+            if(root_header.key_cnt == 0){
+                throw std::runtime_error("internal node should have at least one key");
+            }
+            if(root_header.first_child_page_id == INVALID_PAGE_ID || root_header.first_child_page_id == META_PAGE_ID || root_header.first_child_page_id >= page_cnt){
+                throw std::logic_error("internal node have valid first child page id");
+            }
+        }
+        root_page_id = new_root_page_id;
     }
 }
