@@ -1,5 +1,8 @@
 #include "storage/b_plus_tree.hpp"
 #include <stdexcept>
+#include <bit>
+#include <string>
+#include <utility>
 
 namespace minidb{
     namespace {
@@ -107,17 +110,146 @@ namespace minidb{
                 if(header.next_leaf_page_id != INVALID_PAGE_ID){
                     throw std::invalid_argument("internal node should not have next leaf page id");
                 }
+                if(header.first_child_page_id == INVALID_PAGE_ID){
+                    throw std::invalid_argument("internal node must have first child page id");
+                }
                 break;
             default:
                 throw std::invalid_argument("invalid node type");
         }
-        //write node header to page
+        //write node header to page array
         write_u32(page,NODE_MAGIC_OFFSET,NODE_MAGIC);
         write_u8(page,NODE_TYPE_OFFSET,static_cast<std::uint8_t>(header.type));
-        write_u16(page,NODE_RESERVED_OFFSET,0);
+        write_u8(page,NODE_RESERVED_OFFSET,0);
         write_u16(page,NODE_KEY_CNT_OFFSET,header.key_cnt);
         write_u64(page,NODE_PARENT_PAGE_ID_OFFSET,header.parent_page_id);
         write_u64(page,NODE_NEXT_LEAF_PAGE_ID_OFFSET,header.next_leaf_page_id);
         write_u64(page,NODE_FIRST_CHILD_PAGE_ID_OFFSET,header.first_child_page_id);
+    }
+    BPlusTree::NodeHeader BPlusTree::read_node_header(const Page& page) const{
+        //check header is valid
+        if(read_u32(page, NODE_MAGIC_OFFSET) != NODE_MAGIC){
+            throw std::runtime_error("invalid B+ tree node magic");
+        }
+        if(read_u8(page,NODE_RESERVED_OFFSET) !=0 ){
+            throw std::runtime_error("invalid B+ tree node reserved byte");
+        }
+        //get type
+        const std::uint8_t type_value = read_u8(page,NODE_TYPE_OFFSET);
+        NodeType type;
+        switch(type_value){
+            case 1:
+                type = NodeType::LEAF;
+                break;
+            case 2:
+                type = NodeType::INTERNAL;
+                break;
+            default:
+                throw std::runtime_error("invalid B+ tree node type");
+        }
+        const std::uint16_t key_cnt = read_u16(page,NODE_KEY_CNT_OFFSET);
+        if(key_cnt > MAX_KEYS){
+            throw std::runtime_error("invalid B+ tree node key count");
+        }
+        //construct node header and check
+        NodeHeader header;
+        header.type = type;
+        header.key_cnt = key_cnt;
+        header.parent_page_id = read_u64(page,NODE_PARENT_PAGE_ID_OFFSET);
+        header.next_leaf_page_id = read_u64(page,NODE_NEXT_LEAF_PAGE_ID_OFFSET);
+        header.first_child_page_id = read_u64(page,NODE_FIRST_CHILD_PAGE_ID_OFFSET);
+        if(header.type == NodeType::LEAF){
+            if(header.first_child_page_id != INVALID_PAGE_ID){
+                throw std::runtime_error("leaf node should not have first child page id");
+            }
+        }else{
+            if(header.next_leaf_page_id != INVALID_PAGE_ID){
+                throw std::runtime_error("internal node should not have next leaf page id");
+            }
+            if(header.first_child_page_id == INVALID_PAGE_ID){
+                throw std::runtime_error("internal node should have first child page id");
+            }
+        }
+        return header;
+    }
+    BPlusTree::KeySlot BPlusTree::encode_key(const Value& key) const{
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        KeySlot slot{};
+        //construct key slot based on key type
+        switch(key_type_){
+            case DataType::INT:{
+                const std::uint32_t bits = std::bit_cast<std::uint32_t>(key.as_int());
+                for(std::size_t i = 0; i < sizeof(bits); ++i){
+                    slot[i] = static_cast<std::byte>((bits >> (i * 8)) & 0xFFu);
+                }
+                return slot;
+            }
+            case DataType::STRING:{
+                const std::string& value = key.as_string();
+                if(value.size() > Value::MAX_STRING_LENGTH){
+                    throw std::invalid_argument("string key exceeds maximum length");
+                }
+                const std::uint16_t len = static_cast<std::uint16_t>(value.size());
+                slot[0] = static_cast<std::byte>(len & 0xFFu);
+                slot[1] = static_cast<std::byte>((len >> 8) & 0xFFu);
+                for(std::size_t i = 0; i < value.size(); ++i){
+                    const unsigned char c = static_cast<unsigned char>(value[i]);
+                    slot[2 + i] = static_cast<std::byte>(c);
+                }
+                return slot;
+            }
+            //check invalid key type
+            case DataType::FLOAT:{
+                throw std::invalid_argument("float key type is not supported in B+ tree");
+            }
+            default:
+                throw std::invalid_argument("unsupported key type in B+ tree");
+        }
+    }
+    Value BPlusTree::decode_key(const KeySlot& slot) const{
+        //construct value based on key type
+        switch(key_type_){
+            case DataType::INT:{
+                std::uint32_t bits = 0;
+                for(std::size_t i = 0; i < sizeof(bits); ++i){
+                    const std::uint32_t current = std::to_integer<std::uint8_t>(slot[i]);
+                    bits |= (current << (i * 8));
+                }
+                for(std::size_t i = sizeof(bits); i < slot.size(); ++i){
+                    if(slot[i] != std::byte{0}){
+                        throw std::runtime_error("invalid INT key padding");
+                    }
+                }
+                const std::int32_t value = std::bit_cast<std::int32_t>(bits);
+                return Value(value);
+            }
+            case DataType::STRING:{
+                const std::uint16_t low = std::to_integer<std::uint8_t>(slot[0]);
+                const std::uint16_t high = std::to_integer<std::uint8_t>(slot[1]);
+                const std::uint16_t len = (high << 8) | low;
+                if(len > Value::MAX_STRING_LENGTH){
+                    throw std::runtime_error("invalid string key length");
+                }
+                std::string value;
+                value.reserve(len);
+                for(std::size_t i = 0; i < len; ++i){
+                    const unsigned char c = std::to_integer<unsigned char>(slot[2 + i]);
+                    value.push_back(static_cast<char>(c));
+                }
+                for(std::size_t i = 2 + len; i < slot.size(); ++i){
+                    if(slot[i] != std::byte{0}){
+                        throw std::runtime_error("invalid string key padding");
+                    }
+                }
+                return Value(std::move(value));
+            }
+            case DataType::FLOAT:{
+                throw std::invalid_argument("float key type is not supported in B+ tree");
+            }
+            default:
+                throw std::invalid_argument("unsupported key type in B+ tree");
+        }
     }
 }
