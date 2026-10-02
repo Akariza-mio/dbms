@@ -3,6 +3,7 @@
 #include <bit>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace minidb{
     namespace {
@@ -446,55 +447,258 @@ namespace minidb{
         if(key.get_type() != key_type_){
             throw std::invalid_argument("key type does not match B+ tree key type");
         }
-        //now only support single-level B+ tree search
-        const Page root_page = pager_.read_page(root_page_id);
-        const NodeHeader root_header = read_node_header(root_page);
-        if(root_header.type != NodeType::LEAF) {
-            throw std::logic_error("Multi-level B+ tree search is not implemented yet");
+        //find the leaf contain the key
+        const PageId leaf_page_id = find_leaf_page_id(key);
+        const Page leaf_page = pager_.read_page(leaf_page_id);
+        const NodeHeader leaf_header = read_node_header(leaf_page);
+        if(leaf_header.type != NodeType::LEAF) {
+            throw std::logic_error("should return a leaf node");
         }
-        const std::size_t pos = find_leaf_position(root_page,root_header.key_cnt,key);
-        if(pos >= root_header.key_cnt){
+        const std::size_t pos = find_leaf_position(leaf_page,leaf_header.key_cnt,key);
+        if(pos >= leaf_header.key_cnt){
             return std::nullopt;
         }
-        const Value stored_key = decode_key(read_key_slot(root_page,pos));
+        const Value stored_key = decode_key(read_key_slot(leaf_page,pos));
         if(stored_key != key){
             return std::nullopt;
         }
-        return read_leaf_row_offset(root_page,pos);
+        return read_leaf_row_offset(leaf_page,pos);
     }
     void BPlusTree::insert(const Value& key,row_offset offset){
         if(key.get_type() != key_type_){
             throw std::invalid_argument("key type does not match B+ tree key type");
         }
-        Page root_page = pager_.read_page(root_page_id);
-        NodeHeader root_header = read_node_header(root_page);
-        //now only support single-level B+ tree insert
-        if(root_header.type != NodeType::LEAF){
-            throw std::logic_error("Multi-level B+ tree insert is not implemented yet");
+        const PageId leaf_page_id = find_leaf_page_id(key);
+        Page leaf_page = pager_.read_page(leaf_page_id);
+        NodeHeader leaf_header = read_node_header(leaf_page);
+        if(leaf_header.type != NodeType::LEAF){
+            throw std::logic_error("should return a leaf node");
         }
-        const std::size_t pos = find_leaf_position(root_page,root_header.key_cnt,key);
-        if(pos < root_header.key_cnt){
-            const Value stored_key = decode_key(read_key_slot(root_page,pos));
+        const std::size_t pos = find_leaf_position(leaf_page,leaf_header.key_cnt,key);
+        if(pos < leaf_header.key_cnt){
+            const Value stored_key = decode_key(read_key_slot(leaf_page,pos));
             if(stored_key == key){
                 throw std::invalid_argument("duplicate key insertion");
             }
         }
-        //leaf node splitting will be implemented here later
-        if(root_header.key_cnt >= MAX_KEYS){
-            throw std::overflow_error("B+ tree node is full, splitting is not implemented yet");
+        if(leaf_header.key_cnt >= MAX_KEYS){
+            //insert new key into existing parent
+            if(leaf_header.parent_page_id != INVALID_PAGE_ID){
+                const Page parent_page = pager_.read_page(leaf_header.parent_page_id);
+                const NodeHeader parent_header = read_node_header(parent_page);
+                if(parent_header.type != NodeType::INTERNAL){
+                    throw std::logic_error("parent node should be internal node");
+                }
+                //internal node splitting will be implemented here later
+                if(parent_header.key_cnt >= MAX_KEYS){
+                    throw std::logic_error("parent node is full, internal node splitting not implemented yet");
+                }
+            }
+            const LeafSplitResult res = split_leaf_and_insert(
+                leaf_page_id,
+                leaf_page,
+                leaf_header,
+                key,
+                offset,
+                pos
+            );
+            insert_into_parent(leaf_page_id,res.split_key,res.right_page_id);
+            return;
         }
         //move entries after pos to the right to make space for new entry
-        for(std::size_t destination = root_header.key_cnt; destination > pos; --destination){
+        for(std::size_t destination = leaf_header.key_cnt; destination > pos; --destination){
             const std::size_t source_offset = entry_offset(destination - 1);
             const std::size_t destination_offset = entry_offset(destination);
             for(std::size_t i = 0; i < ENTRY_SIZE; ++i){
-                root_page[destination_offset + i] = root_page[source_offset + i];
+                leaf_page[destination_offset + i] = leaf_page[source_offset + i];
             }
         }
         //add new entry at pos
-        write_leaf_entry(root_page,pos,key,offset);
-        ++root_header.key_cnt;
-        write_node_header(root_page,root_header);
-        pager_.write_page(root_page_id,root_page);
+        write_leaf_entry(leaf_page,pos,key,offset);
+        ++leaf_header.key_cnt;
+        write_node_header(leaf_page,leaf_header);
+        pager_.write_page(leaf_page_id,leaf_page);
+    }
+    [[nodiscard]] BPlusTree::PageId BPlusTree::read_internal_child_page_id(const Pager::Page& page,std::size_t index) const{
+        return read_u64(page,entry_offset(index) + KEY_SLOT_SIZE);
+    }
+    void BPlusTree::write_internal_entry(Pager::Page& page,std::size_t index,const Value& key,PageId right_child_page_id) const{
+        write_key_slot(page,index,encode_key(key));
+        write_u64(page,entry_offset(index) + KEY_SLOT_SIZE,right_child_page_id);
+    }
+    BPlusTree::PageId BPlusTree::find_leaf_page_id(const Value& key){
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        PageId now_page_id = root_page_id;
+        const PageId page_cnt = pager_.get_page_cnt();
+        //search page_cnt pages at most
+        for(PageId visited = 0; visited < page_cnt; ++visited){
+            const Page page = pager_.read_page(now_page_id);
+            const NodeHeader header = read_node_header(page);
+            if(header.type == NodeType::LEAF){
+                return now_page_id;
+            }
+            //not leaf node,binary search the first key that > the given key
+            std::size_t l = 0, r = header.key_cnt;
+            while(l < r){
+                const std::size_t mid = (l + r) / 2;
+                const Value mid_key = decode_key(read_key_slot(page,mid));
+                if(key < mid_key){
+                    r = mid;
+                }else{
+                    l = mid + 1;
+                }
+            }
+            PageId child_page_id;
+            if(l == 0){
+                child_page_id = header.first_child_page_id;
+            }else{
+                child_page_id = read_internal_child_page_id(page,l - 1);
+            }
+            if(child_page_id == INVALID_PAGE_ID || child_page_id == META_PAGE_ID || child_page_id >= page_cnt){
+                throw std::runtime_error("invalid child page id");
+            }
+            now_page_id = child_page_id;
+        }
+        throw std::runtime_error("B+ tree search exceeded maximum depth, possible cycle in tree");
+    }
+    BPlusTree::LeafSplitResult BPlusTree::split_leaf_and_insert(
+        PageId leaf_page_id,
+        const Pager::Page& leaf_page,
+        const NodeHeader& leaf_header,
+        const Value& key,
+        row_offset offset,
+        std::size_t insert_pos
+    ){
+        if(leaf_header.type != NodeType::LEAF){
+            throw std::invalid_argument("cannot split a non_leaf node");
+        }
+        if(leaf_header.key_cnt != MAX_KEYS){
+            throw std::invalid_argument("cannot split a non_full node");
+        }
+        if(insert_pos > leaf_header.key_cnt){
+            throw std::invalid_argument("insert position is out of range");
+        }
+        //define a entry pair for vector holding
+        using Entry = std::pair<Value,row_offset>;
+        std::vector<Entry> entries;
+        entries.reserve(MAX_KEYS + 1);
+        //copy entries to vector and insert the new entry
+        for(std::size_t i = 0; i < leaf_header.key_cnt; ++i){
+            entries.emplace_back(decode_key(read_key_slot(leaf_page,i)),read_leaf_row_offset(leaf_page,i));
+        }
+        entries.insert(entries.begin() + static_cast<std::vector<Entry>::difference_type>(insert_pos),Entry{key,offset});
+        const std::size_t left_cnt = entries.size() / 2;
+        const std::size_t right_cnt = entries.size() - left_cnt;
+        //create new right leaf page
+        const PageId right_page_id = pager_.allocate_page();
+        Pager::Page new_left_page{};
+        Pager::Page new_right_page{};
+        //construct header of new left page
+        NodeHeader new_left_header = leaf_header;
+        new_left_header.key_cnt = static_cast<std::uint16_t>(left_cnt);
+        //construct header of new right page
+        new_left_header.next_leaf_page_id = right_page_id;
+        NodeHeader new_right_header{
+            NodeType::LEAF,
+            static_cast<std::uint16_t>(right_cnt),
+            leaf_header.parent_page_id,
+            leaf_header.next_leaf_page_id,
+            INVALID_PAGE_ID
+        };
+        //construct new left page
+        for(std::size_t i = 0; i < left_cnt; ++i){
+            write_leaf_entry(new_left_page,i,entries[i].first,entries[i].second);
+        }
+        //construct new right page
+        for(std::size_t i = 0; i < right_cnt; ++i){
+            write_leaf_entry(new_right_page,i,entries[left_cnt + i].first,entries[left_cnt + i].second);
+        }
+        //write: node header to page,page to file
+        write_node_header(new_left_page,new_left_header);
+        write_node_header(new_right_page,new_right_header);
+        pager_.write_page(leaf_page_id,new_left_page);
+        pager_.write_page(right_page_id,new_right_page);
+        return LeafSplitResult{entries[left_cnt].first,right_page_id};
+    }
+    void BPlusTree::insert_into_parent(PageId left_page_id,const Value& separator_key,PageId right_page_id){
+        Pager::Page left_page = pager_.read_page(left_page_id);
+        Pager::Page right_page = pager_.read_page(right_page_id);
+        NodeHeader left_header = read_node_header(left_page);
+        NodeHeader right_header = read_node_header(right_page);
+        if(left_header.parent_page_id != right_header.parent_page_id){
+            throw std::runtime_error("left and right page should have the same parent"); 
+        }
+        //if left page has no parent, create a new root page
+        if(left_header.parent_page_id == INVALID_PAGE_ID){
+            if(left_page_id != root_page_id){
+                throw std::runtime_error("only root page can have no parent");
+            }
+            //construct new root page and write to file
+            const PageId new_root_page_id = pager_.allocate_page();
+            Pager::Page new_root_page{};
+            NodeHeader new_root_header{
+                NodeType::INTERNAL,
+                1,
+                INVALID_PAGE_ID,
+                INVALID_PAGE_ID,
+                left_page_id
+            };
+            write_internal_entry(new_root_page,0,separator_key,right_page_id);
+            write_node_header(new_root_page,new_root_header);
+            left_header.parent_page_id = new_root_page_id;
+            right_header.parent_page_id = new_root_page_id;
+            write_node_header(left_page,left_header);
+            write_node_header(right_page,right_header);
+            pager_.write_page(left_page_id,left_page);
+            pager_.write_page(right_page_id,right_page);
+            pager_.write_page(new_root_page_id,new_root_page);
+            root_page_id = new_root_page_id;
+            //renew metadata page
+            write_metadata();
+            return;
+        }
+        //nodes has parent
+        const PageId parent_page_id = left_header.parent_page_id;
+        Pager::Page parent_page = pager_.read_page(parent_page_id);
+        NodeHeader parent_header = read_node_header(parent_page);
+        if(parent_header.type != NodeType::INTERNAL){
+            throw std::logic_error("parent page should be an internal node");
+        }
+        if(parent_header.key_cnt >= MAX_KEYS){
+            throw std::overflow_error("parent node is full, splitting is not implemented yet");
+        }
+        //insert key to parent page
+        std::size_t insert_pos = 0;
+        bool left_child_found = false;
+        if(parent_header.first_child_page_id == left_page_id){
+            left_child_found = true;
+            insert_pos = 0;
+        }else{
+            //if child i is splitting, then the separator key is inserted at position i + 1
+            for(std::size_t i = 0; i < parent_header.key_cnt; ++i){
+                if(read_internal_child_page_id(parent_page,i) == left_page_id){
+                    left_child_found = true;
+                    insert_pos = i + 1;
+                    break;
+                }
+            }
+        }
+        if(!left_child_found){
+            throw std::logic_error("left page is not a child of its parent");
+        }
+        //move right entries to make a space for new entry
+        for(std::size_t destination = parent_header.key_cnt; destination > insert_pos; --destination){
+            const std::size_t source_offset = entry_offset(destination - 1);
+            const std::size_t destination_offset = entry_offset(destination);
+            for(std::size_t i = 0; i < ENTRY_SIZE; ++i){
+                parent_page[destination_offset + i] = parent_page[source_offset + i];
+            }
+        }
+        write_internal_entry(parent_page,insert_pos,separator_key,right_page_id);
+        ++parent_header.key_cnt;
+        write_node_header(parent_page,parent_header);
+        pager_.write_page(parent_page_id,parent_page);
     }
 }

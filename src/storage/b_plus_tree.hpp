@@ -80,7 +80,26 @@ private:
     [[nodiscard]] row_offset read_leaf_row_offset(const Pager::Page& page,std::size_t index) const;
     //write the key and row offset to the page at the given index
     void write_leaf_entry(Pager::Page& page,std::size_t index,const Value& key,row_offset offset) const;
-    //find the key position
+    //find the key position in leaf page
     [[nodiscard]] std::size_t find_leaf_position(const Pager::Page& page,std::uint16_t key_cnt,const Value& key) const;
+    //write and read child_page_id
+    [[nodiscard]] PageId read_internal_child_page_id(const Pager::Page& page,std::size_t index) const;
+    void write_internal_entry(Pager::Page& page,std::size_t index,const Value& key,PageId right_child_page_id) const;
+    //get leaf page id that contain the key 
+    [[nodiscard]] PageId find_leaf_page_id(const Value& key);
+    //new: child node and key adding to parent
+    struct LeafSplitResult{
+        Value split_key;
+        PageId right_page_id;
+    };
+    [[nodiscard]] LeafSplitResult split_leaf_and_insert(
+        PageId leaf_page_id,
+        const Pager::Page& leaf_page,
+        const NodeHeader& leaf_header,
+        const Value& key,
+        row_offset offset,
+        std::size_t insert_pos
+    );
+    void insert_into_parent(PageId left_page_id,const Value& separator_key,PageId right_page_id);
 };
 }
