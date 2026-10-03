@@ -101,5 +101,19 @@ private:
         std::size_t insert_pos
     );
     void insert_into_parent(PageId left_page_id,const Value& separator_key,PageId right_page_id);
+    //for internal node split
+    struct InternalSplitResult{
+        Value promoted_key;
+        PageId right_page_id;
+    };
+    [[nodiscard]] InternalSplitResult split_internal_and_insert(
+        PageId internal_page_id,
+        const Pager::Page& internal_page,
+        const NodeHeader& internal_header,
+        const Value& separator_key,
+        PageId right_child_page_id,
+        std::size_t insert_pos
+    );
+    void update_child_parent(PageId child_page_id,PageId new_parent_page_id);
 };
 }

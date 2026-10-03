@@ -489,10 +489,6 @@ namespace minidb{
                 if(parent_header.type != NodeType::INTERNAL){
                     throw std::logic_error("parent node should be internal node");
                 }
-                //internal node splitting will be implemented here later
-                if(parent_header.key_cnt >= MAX_KEYS){
-                    throw std::logic_error("parent node is full, internal node splitting not implemented yet");
-                }
             }
             const LeafSplitResult res = split_leaf_and_insert(
                 leaf_page_id,
@@ -666,9 +662,6 @@ namespace minidb{
         if(parent_header.type != NodeType::INTERNAL){
             throw std::logic_error("parent page should be an internal node");
         }
-        if(parent_header.key_cnt >= MAX_KEYS){
-            throw std::overflow_error("parent node is full, splitting is not implemented yet");
-        }
         //insert key to parent page
         std::size_t insert_pos = 0;
         bool left_child_found = false;
@@ -688,6 +681,19 @@ namespace minidb{
         if(!left_child_found){
             throw std::logic_error("left page is not a child of its parent");
         }
+        //parent is full
+        if(parent_header.key_cnt >= MAX_KEYS){
+            const InternalSplitResult res = split_internal_and_insert(
+                parent_page_id,
+                parent_page,
+                parent_header,
+                separator_key,
+                right_page_id,
+                insert_pos
+            );
+            insert_into_parent(parent_page_id,res.promoted_key,res.right_page_id);
+            return;
+        }
         //move right entries to make a space for new entry
         for(std::size_t destination = parent_header.key_cnt; destination > insert_pos; --destination){
             const std::size_t source_offset = entry_offset(destination - 1);
@@ -700,5 +706,97 @@ namespace minidb{
         ++parent_header.key_cnt;
         write_node_header(parent_page,parent_header);
         pager_.write_page(parent_page_id,parent_page);
+    }
+    //update the parent of the right child internal page
+    void BPlusTree::update_child_parent(PageId child_page_id,PageId new_parent_page_id){
+        const PageId page_cnt = pager_.get_page_cnt();
+        if(child_page_id == INVALID_PAGE_ID || child_page_id == META_PAGE_ID || child_page_id >= page_cnt){
+            throw std::invalid_argument("invalid child page id");
+        }
+        if(new_parent_page_id == INVALID_PAGE_ID || new_parent_page_id == META_PAGE_ID || new_parent_page_id >= page_cnt){
+            throw std::invalid_argument("invalid new parent page id");
+        }
+        Pager::Page child_page = pager_.read_page(child_page_id);
+        NodeHeader child_header = read_node_header(child_page);
+        child_header.parent_page_id = new_parent_page_id;
+        write_node_header(child_page,child_header);
+        pager_.write_page(child_page_id,child_page);
+    }
+    BPlusTree::InternalSplitResult BPlusTree::split_internal_and_insert(
+        PageId internal_page_id,
+        const Pager::Page& internal_page,
+        const NodeHeader& internal_header,
+        const Value& separator_key,
+        PageId right_child_page_id,
+        std::size_t insert_pos
+    ){
+        if(internal_header.type != NodeType::INTERNAL){
+            throw std::invalid_argument("cannot split a non_internal node");
+        }
+        if(internal_header.key_cnt != MAX_KEYS){
+            throw std::logic_error("cannot split a non_full node");
+        }
+        if(insert_pos > internal_header.key_cnt){
+            throw std::out_of_range("insert position is out of range");
+        }
+        if(separator_key.get_type() != key_type_){
+            throw std::invalid_argument("separator key type does not match B+ tree key type");
+        }
+        using KeyList = std::vector<Value>;
+        using ChildList = std::vector<PageId>;
+        KeyList keys;
+        ChildList children;
+        keys.reserve(MAX_KEYS + 1);
+        children.reserve(MAX_KEYS + 2);
+        //copy existing keys and children to vectors
+        children.push_back(internal_header.first_child_page_id);
+        for(std::size_t i = 0; i < internal_header.key_cnt; ++i){
+            keys.push_back(decode_key(read_key_slot(internal_page,i)));
+            children.push_back(read_internal_child_page_id(internal_page,i));
+        }
+        //insert new separator key
+        keys.insert(keys.begin() + static_cast<KeyList::difference_type>(insert_pos),separator_key);
+        children.insert(children.begin() + static_cast<ChildList::difference_type>(insert_pos + 1),right_child_page_id);
+        if(keys.size() != MAX_KEYS + 1 || children.size() != MAX_KEYS + 2){
+            throw std::logic_error("internal node split vectors size mismatch");
+        }
+        const std::size_t promoted_index = keys.size() / 2;
+        const Value promoted_key = keys[promoted_index];
+        const std::size_t left_cnt = promoted_index;
+        const std::size_t right_cnt = keys.size() - promoted_index - 1;
+        const PageId new_right_page_id = pager_.allocate_page();
+        Pager::Page new_left_page{};
+        Pager::Page new_right_page{};
+        //construct new left page header:key 0-7 children 0-8
+        NodeHeader new_left_header{
+            NodeType::INTERNAL,
+            static_cast<std::uint16_t>(left_cnt),
+            internal_header.parent_page_id,
+            INVALID_PAGE_ID,
+            children[0]
+        };
+        for(std::size_t i = 0; i < left_cnt; ++i){
+            write_internal_entry(new_left_page,i,keys[i],children[i + 1]);
+        }
+        //construct new right page header:key 9-15 children 9-16
+        NodeHeader new_right_header{
+            NodeType::INTERNAL,
+            static_cast<std::uint16_t>(right_cnt),
+            internal_header.parent_page_id,
+            INVALID_PAGE_ID,
+            children[promoted_index + 1]
+        };
+        for(std::size_t i = 0; i < right_cnt; ++i){
+            write_internal_entry(new_right_page,i,keys[promoted_index + 1 + i],children[promoted_index + 2 + i]);
+        }
+        write_node_header(new_left_page,new_left_header);
+        write_node_header(new_right_page,new_right_header);
+        pager_.write_page(internal_page_id,new_left_page);
+        pager_.write_page(new_right_page_id,new_right_page);
+        //update new right internal node's children's parent page id
+        for(std::size_t i = promoted_index + 1; i < children.size(); ++i){
+            update_child_parent(children[i],new_right_page_id);
+        }
+        return InternalSplitResult{promoted_key,new_right_page_id};
     }
 }
