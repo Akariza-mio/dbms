@@ -22,6 +22,7 @@ public:
     
     [[nodiscard]] std::optional<row_offset> search(const Value& key);
     void insert(const Value& key,row_offset offset);
+    [[nodiscard]] bool erase(const Value& key);
 private:
     //sign of invalid page
     static constexpr PageId INVALID_PAGE_ID = std::numeric_limits<PageId>::max();

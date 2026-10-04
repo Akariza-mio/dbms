@@ -799,4 +799,41 @@ namespace minidb{
         }
         return InternalSplitResult{promoted_key,new_right_page_id};
     }
+    bool BPlusTree::erase(const Value& key){
+        if(key.get_type() != key_type_){
+            throw std::invalid_argument("key type does not match B+ tree key type");
+        }
+        //get the deleting leaf page and its header
+        const PageId leaf_page_id = find_leaf_page_id(key);
+        Pager::Page leaf_page = pager_.read_page(leaf_page_id);
+        NodeHeader leaf_header = read_node_header(leaf_page);
+        if(leaf_header.type != NodeType::LEAF){
+            throw std::logic_error("should return a leaf node");
+        }
+        const std::size_t pos = find_leaf_position(leaf_page,leaf_header.key_cnt,key);
+        if(pos >= leaf_header.key_cnt){
+            return false;
+        }
+        const Value stored_key = decode_key(read_key_slot(leaf_page,pos));
+        if(stored_key != key){
+            return false;
+        }
+        //move entries to left to overwrite the deleted entry
+        for(std::size_t source = pos + 1; source < leaf_header.key_cnt; ++source){
+            const std::size_t source_offset = entry_offset(source);
+            const std::size_t destination_offset = entry_offset(source - 1);
+            for(std::size_t i = 0; i < ENTRY_SIZE; ++i){
+                leaf_page[destination_offset + i] = leaf_page[source_offset + i];
+            }
+        }
+        //clear the last entry
+        const std::size_t last_offset = entry_offset(leaf_header.key_cnt - 1);
+        for(std::size_t i = 0; i < ENTRY_SIZE; ++i){
+            leaf_page[last_offset + i] = std::byte{0};
+        }
+        --leaf_header.key_cnt;
+        write_node_header(leaf_page,leaf_header);
+        pager_.write_page(leaf_page_id,leaf_page);
+        return true;
+    }
 }
