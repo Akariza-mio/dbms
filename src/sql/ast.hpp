@@ -69,7 +69,7 @@ namespace minidb::sql{
         std::string column_name;
         Value value;
     };
-    //a select item = count(*) or "name" or *
+    //a select item = count(id) or "name" or *
     struct SelectItem{
         SelectType type;
         std::string column_name;

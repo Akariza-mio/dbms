@@ -102,6 +102,10 @@ namespace minidb::sql{
             return parse_insert();
         }else if(match_keyword("DELETE")){
             return parse_delete();
+        }else if(match_keyword("UPDATE")){
+            return parse_update();
+        }else if(match_keyword("SELECT")){
+            return parse_select();
         }
         throw ParserError(current().pos,"unsupported SQL command '" + current().text + "'");
     }
@@ -353,8 +357,99 @@ namespace minidb::sql{
         match_keyword("from");
         command.table_name = expect_identifier("table name");
         //where is optional
-        if(match_keyword("where")){
+        parse_optional_where(command);
+        expect_statement_end();
+        return command;
+    }
+    SQLCommand Parser::parse_update(){
+        SQLCommand command{};
+        command.type = CommandType::UPDATE;
+        command.table_name = expect_identifier("table name");
+        //set is essential
+        expect_keyword("set");
+        while(true){
+            std::string column_name = expect_identifier("column name");
+            expect(TokenType::EQUAL,"expected '=' after column name");
+            Value value = parse_literal();
+            command.assignments.push_back(Assignment{std::move(column_name),std::move(value)});
+            if(!match(TokenType::COMMA)){
+                break;
+            }
+            //what comes after ',' must be another assignment
+            if(check(TokenType::SEMICOLON) || check(TokenType::END_OF_INPUT) || check_keyword("where")){
+                throw ParserError(current().pos,"expected assignment after ','");
+            }
+        }
+        parse_optional_where(command);
+        expect_statement_end();
+        return command;
+    }
+    void Parser::parse_optional_where(SQLCommand& command){
+        if(!match_keyword("where")){
+            return;
+        }
+        //there must be at least one condition after WHERE
+        command.conditions.push_back(parse_condition());
+        while(true){
+            if(match_keyword("and")){
+                command.logical_operators.push_back(LogicalOperator::AND);
+            }else if(match_keyword("or")){
+                command.logical_operators.push_back(LogicalOperator::OR);
+            }else{
+                break;
+            }
             command.conditions.push_back(parse_condition());
+        }
+    }
+    SelectItem Parser::parse_selectItem(){
+        // select *
+        if(match(TokenType::ASTERISK)){
+            return SelectItem{SelectType::ALL,"",AggregateType::NONE};
+        }
+        AggregateType aggregate = AggregateType::NONE;
+        if(match_keyword("count")){
+            aggregate = AggregateType::COUNT;
+        }else if(match_keyword("max")){
+            aggregate = AggregateType::MAX;
+        }else if(match_keyword("min")){
+            aggregate = AggregateType::MIN;
+        }else if(match_keyword("avg")){
+            aggregate = AggregateType::AVG;
+        }
+        //aggregate function is detected
+        if(aggregate != AggregateType::NONE){
+            expect(TokenType::LEFT_PAREN,"expected '(' after aggregate function");
+            std::string column_name = expect_identifier("column name in aggregate function");
+            expect(TokenType::RIGHT_PAREN,"expected ')' after column name");
+            return SelectItem{SelectType::AGGREGATE,std::move(column_name),aggregate};
+        }
+        std::string column_name = expect_identifier("column name in select list");
+        return SelectItem{SelectType::COLUMN,std::move(column_name),AggregateType::NONE};
+    }
+    SQLCommand Parser::parse_select(){
+        SQLCommand command{};
+        command.type = CommandType::SELECT;
+        //FROM can not be the first token after SELECT
+        if(check_keyword("from")){
+            throw ParserError(current().pos,"expected select list before 'FROM'");
+        }
+        while(true){
+            command.select_items.push_back(parse_selectItem());
+            if(!match(TokenType::COMMA)){
+                break;
+            }
+            if(check_keyword("from") || check(TokenType::SEMICOLON) || check(TokenType::END_OF_INPUT)){
+                throw ParserError(current().pos,"expected select item after ','");
+            }
+        }
+        expect_keyword("from");
+        command.table_name = expect_identifier("table name");
+        //where is optional
+        parse_optional_where(command);
+        //group by is optional
+        if(match_keyword("group")){
+            expect_keyword("by");
+            command.group_by_column = expect_identifier("column name after 'GROUP BY'");
         }
         expect_statement_end();
         return command;

@@ -58,6 +58,10 @@ private:
     [[nodiscard]] SQLCommand parse_insert();
     [[nodiscard]] ComparisonOperator parse_comparison_op();
     [[nodiscard]] Condition parse_condition();
+    void parse_optional_where(SQLCommand& command);
     [[nodiscard]] SQLCommand parse_delete();
+    [[nodiscard]] SQLCommand parse_update();
+    [[nodiscard]] SelectItem parse_selectItem();
+    [[nodiscard]] SQLCommand parse_select();
 };
 }
