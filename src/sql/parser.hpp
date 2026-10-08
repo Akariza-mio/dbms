@@ -52,5 +52,12 @@ private:
     [[nodiscard]] SQLCommand parse_create_table();
     [[nodiscard]] SQLCommand parse_drop_table();
     [[nodiscard]] SQLCommand parse_alter();
+    //turn literal token into value in row
+    [[nodiscard]] Value parse_literal();
+    //parsen DML
+    [[nodiscard]] SQLCommand parse_insert();
+    [[nodiscard]] ComparisonOperator parse_comparison_op();
+    [[nodiscard]] Condition parse_condition();
+    [[nodiscard]] SQLCommand parse_delete();
 };
 }

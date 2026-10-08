@@ -2,6 +2,10 @@
 #include <string>
 #include <cctype>
 #include <utility>
+#include <charconv>
+#include <cstdint>
+#include <string_view>
+#include <system_error>
 
 namespace minidb::sql{
     namespace {
@@ -93,7 +97,11 @@ namespace minidb::sql{
         }else if(match_keyword("SHOW")){
             return parse_show();
         }else if(match_keyword("ALTER")){
-            return  parse_alter();
+            return parse_alter();
+        }else if(match_keyword("INSERT")){
+            return parse_insert();
+        }else if(match_keyword("DELETE")){
+            return parse_delete();
         }
         throw ParserError(current().pos,"unsupported SQL command '" + current().text + "'");
     }
@@ -254,5 +262,101 @@ namespace minidb::sql{
             return command;
         }
         throw ParserError(current().pos,"expected 'add', 'drop' or 'rename' after 'ALTER TABLE'");
+    }
+    Value Parser::parse_literal(){
+        const Token& token = current();
+        // parse string
+        if(check(TokenType::STRING_LITERAL)){
+            advance();
+            return Value(token.text);
+        }
+        if(!check(TokenType::NUMBER)){
+            throw ParserError(token.pos,"expected literal value");
+        }
+        advance();
+        std::string_view text = token.text;
+        if(!text.empty() && text.front() == '+'){
+            text.remove_prefix(1);
+        }
+        //parse float
+        if(token.text.find('.') != std::string::npos){
+            double value{};
+            const auto [end,error] = std::from_chars(text.data(),text.data() + text.size(),value);
+            if(error == std::errc::result_out_of_range){
+                throw ParserError(token.pos,"float literal value is out of range");
+            }
+            if(error != std::errc{} || end != text.data() + text.size()){
+                throw ParserError(token.pos,"invalid float literal value");
+            }
+            return Value(value);
+        }
+        //parse integer
+        std::int32_t value{};
+        const auto [end,error] = std::from_chars(text.data(),text.data() + text.size(),value);
+        if(error == std::errc::result_out_of_range){
+            throw ParserError(token.pos,"integer literal value is out of range");
+        }
+        if(error != std::errc{} || end != text.data() + text.size()){
+            throw ParserError(token.pos,"invalid integer literal value");
+        }
+        return Value(value);
+    }
+    SQLCommand Parser::parse_insert(){
+        SQLCommand command{};
+        command.type = CommandType::INSERT;
+        //into is optional
+        match_keyword("into");
+        command.table_name = expect_identifier("table name");
+        expect_keyword("values");
+        expect(TokenType::LEFT_PAREN,"expected '(' after 'VALUES'");
+        //VALUES () is not allowed
+        if(check(TokenType::RIGHT_PAREN)){
+            throw ParserError(current().pos,"expected at least one value in 'VALUES'");
+        }
+        while(true){
+            command.values.push_back(parse_literal());
+            if(match(TokenType::COMMA)){
+                if(check(TokenType::RIGHT_PAREN)){
+                    throw ParserError(current().pos,"expected value after ','");
+                }
+                continue;
+            }
+            expect(TokenType::RIGHT_PAREN,"expected ',' or ')' after values");
+            break;
+        }
+        expect_statement_end();
+        return command;
+    }
+    ComparisonOperator Parser::parse_comparison_op(){
+        if(match(TokenType::EQUAL)){
+            return ComparisonOperator::EQUAL;
+        }
+        if(match(TokenType::LESS)){
+            return ComparisonOperator::LESS;
+        }
+        if(match(TokenType::GREATER)){
+            return ComparisonOperator::GREATER;
+        }
+        throw ParserError(current().pos,"expected comparison operator");
+    }
+    //parse condition of WHERE clause
+    Condition Parser::parse_condition(){
+        std::string column_name = expect_identifier("column name");
+        const ComparisonOperator cmp = parse_comparison_op();
+        Value value = parse_literal();
+        return Condition{std::move(column_name),cmp,std::move(value)};
+    }
+    SQLCommand Parser::parse_delete(){
+        SQLCommand command{};
+        command.type = CommandType::DELETE;
+        //from is optional
+        match_keyword("from");
+        command.table_name = expect_identifier("table name");
+        //where is optional
+        if(match_keyword("where")){
+            command.conditions.push_back(parse_condition());
+        }
+        expect_statement_end();
+        return command;
     }
 }
