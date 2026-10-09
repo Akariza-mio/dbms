@@ -22,6 +22,7 @@ add_library(minidbms_core
     src/storage/b_plus_tree.cpp
     src/sql/tokenizer.cpp
     src/sql/parser.cpp
+    src/execution/executor.cpp
 )
 
 # 允许链接 minidbms_core 的目标使用形如 "core/value.hpp" 的包含路径
