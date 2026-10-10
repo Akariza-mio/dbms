@@ -42,5 +42,9 @@ private:
     [[nodiscard]] std::filesystem::path table_path(const std::string& db_name,const std::string& table_name) const;
     [[nodiscard]] std::filesystem::path table_index_path(const std::string& db_name,const std::string& table_name) const;
     void save_catalog() const;
+    //insert
+    [[nodiscard]] ExecutionResult execute_insert(const sql::SQLCommand& command);
+    [[nodiscard]] std::vector<Value> normalize_insert_values(const Table& table,const std::vector<Value>& input) const;
+    
 };
 }

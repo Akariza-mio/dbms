@@ -5,6 +5,19 @@
 #include <utility>
 
 namespace minidb {
+    namespace {
+        const char* data_type_name(DataType type){
+            switch(type){
+                case DataType::INT:
+                    return "INT";
+                case DataType::FLOAT:
+                    return "FLOAT";
+                case DataType::STRING:
+                    return "STRING";
+            }
+            throw std::logic_error("Unknown DataType");
+        }
+    }
     Executor::Executor(const std::filesystem::path& data_directory)
         : data_directory_(data_directory),catalog_path_(data_directory_/"catalog.meta"){
             if(data_directory_.empty()){
@@ -75,6 +88,7 @@ namespace minidb {
                 case sql::CommandType::SHOW_TABLES:
                     return execute_show_tables(command);
                 case sql::CommandType::INSERT:
+                    return execute_insert(command);
                 case sql::CommandType::DELETE:
                 case sql::CommandType::UPDATE:
                 case sql::CommandType::SELECT:
@@ -365,6 +379,91 @@ namespace minidb {
         }
         ExecutionResult res{};
         res.message = "Table dropped successfully: " + command.table_name;
+        return res;
+    }
+    //check if input is legal and handle type conversion
+    std::vector<Value> Executor::normalize_insert_values(const Table& table,const std::vector<Value>& input) const{
+        if(input.size() != table.get_column_cnt()){
+            throw ExecutionError("Number of values does not match number of columns in table '" + table.get_name() + "'");
+        }
+        std::vector<Value> res;
+        res.reserve(input.size());
+        for(std::size_t i = 0; i < input.size(); ++i){
+            const Column& column = table.get_column(i);
+            const Value& value = input[i];
+            const DataType column_type = column.get_type();
+            const DataType value_type = value.get_type();
+            if(column_type == value_type){
+                res.push_back(value);
+                continue;
+            }
+            //INT must be converted to FLOAT safely
+            if(column_type == DataType::FLOAT && value_type == DataType::INT){
+                res.emplace_back(static_cast<double>(value.as_int()));
+                continue;
+            }
+            throw ExecutionError("Type mismatch for column '" + column.get_name() + "': expected " + data_type_name(column_type) + ", got " + data_type_name(value_type));
+        }
+        return res;
+    }
+    //execute an INSERT command
+    ExecutionResult Executor::execute_insert(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
+        //get normalized values
+        std::vector<Value> normalized_values = normalize_insert_values(table,command.values);
+        Row row{std::move(normalized_values)};
+        //get table data path
+        const std::filesystem::path data_path = table_path(db_name,command.table_name);
+        std::error_code error;
+        const bool data_exists = std::filesystem::exists(data_path,error);
+        if(error){
+            throw ExecutionError("failed to check if table data file exists: " + data_path.string() + ": " + error.message());
+        }
+        if(!data_exists){
+            throw ExecutionError("table data file does not exist: " + data_path.string());
+        }
+        TableFile table_file{data_path};
+        const std::optional<std::size_t> pk_id = table.get_pk_id();
+        if(!pk_id.has_value()){
+            //only insert into .dat file
+            static_cast<void>(table_file.insert_row(row));
+        }else{
+            const std::size_t key_id = pk_id.value();
+            const Column& pk_column = table.get_column(key_id);
+            const Value& pk = row.get_value(key_id);
+            const std::filesystem::path index_path = table_index_path(db_name,command.table_name);
+            error.clear();
+            const bool index_exists = std::filesystem::exists(index_path,error);
+            if(error){
+                throw ExecutionError("failed to check if table index file exists: " + index_path.string() + ": " + error.message());
+            }
+            if(!index_exists){
+                throw ExecutionError("table index file does not exist: " + index_path.string());
+            }
+            BPlusTree index{index_path,pk_column.get_type()};
+            // check for duplicate primary key before inserting
+            if(index.search(pk).has_value()){
+                throw ExecutionError("Duplicate primary key value for column '" + pk_column.get_name() + "': " + pk.to_string());
+            }
+            //insert will return the row offset of the inserted row in the .dat file
+            const TableFile::Row_offset row_offset = table_file.insert_row(row);
+            try{
+                //insert into B+ tree
+                index.insert(pk,row_offset);
+            }catch(const std::exception& exception) {
+                try {
+                    //rollback the .dat file if B+ tree insertion fails
+                    table_file.delete_row(row_offset);
+                }catch(const std::exception& rollback_exception){
+                    throw ExecutionError("Failed to insert into B+ tree: " + std::string(exception.what()) + "; Failed to rollback .dat file: " + rollback_exception.what());
+                }
+                throw ExecutionError("Failed to insert into B+ tree: " + std::string(exception.what()));
+            }
+        }
+        ExecutionResult res{};
+        res.affected_rows = 1;
+        res.message = "1 row inserted successfully into table '" + table.get_name() + "'";
         return res;
     }
 }
