@@ -1,6 +1,6 @@
 #include "execution/executor.hpp"
-#include "storage/b_plus_tree.hpp"
 #include "storage/table_file.hpp"
+#include "storage/b_plus_tree.hpp"
 #include <system_error>
 #include <utility>
 
@@ -92,6 +92,7 @@ namespace minidb {
                 case sql::CommandType::DELETE:
                 case sql::CommandType::UPDATE:
                 case sql::CommandType::SELECT:
+                    return execute_select(command);
                 case sql::CommandType::ALTER_TABLE:
                     throw ExecutionError("Command type not implemented yet");
             }
@@ -464,6 +465,180 @@ namespace minidb {
         ExecutionResult res{};
         res.affected_rows = 1;
         res.message = "1 row inserted successfully into table '" + table.get_name() + "'";
+        return res;
+    }
+    std::vector<Executor::parsedCondition> Executor::parse_conditions(const Table& table,const sql::SQLCommand& command) const{
+        //no conditions in SELECT
+        if(command.conditions.empty()){
+            if(!command.logical_operators.empty()){
+                throw ExecutionError("Logical operators provided without any conditions");
+            }
+            return {};
+        }
+        if(command.logical_operators.size() + 1 != command.conditions.size()){
+            throw ExecutionError("Invalid WHERE condition chain");
+        }
+        std::vector<parsedCondition> res;
+        res.reserve(command.conditions.size());
+        for(const auto& condition : command.conditions){
+            //convert column name to column id
+            const std::optional<std::size_t> column_id = table.get_column_id(condition.column_name);
+            if(!column_id.has_value()){
+                throw ExecutionError("Column does not exist: " + condition.column_name);
+            }
+            const Column& column = table.get_column(column_id.value());
+            const DataType expected_type = column.get_type();
+            const DataType actual_type = condition.value.get_type();
+            if(expected_type == actual_type){
+                res.emplace_back(
+                    column_id.value(),
+                    condition.comparison,
+                    condition.value
+                );
+                continue;
+            }
+            //FLOAT can be compared with INT
+            if(expected_type == DataType::FLOAT && actual_type == DataType::INT){
+                res.emplace_back(
+                    column_id.value(),
+                    condition.comparison,
+                    Value(static_cast<double>(condition.value.as_int()))
+                );
+                continue;
+            }
+            throw ExecutionError("Type mismatch for column '" + column.get_name() + "': expected " + data_type_name(expected_type) + ", got " + data_type_name(actual_type));
+        }
+        return res;
+    }
+    bool Executor::row_matches_conditions(
+        const Row& row,
+        const std::vector<parsedCondition>& conditions,
+        const std::vector<sql::LogicalOperator>& logical_operators
+    )const {
+        if(conditions.empty()){
+            return true;
+        }
+        if(logical_operators.size() + 1 != conditions.size()){
+            throw ExecutionError("Invalid logical operator chain");
+        }
+        //temporary function to evaluate a single condition 
+        const auto evaluate = [&row](const parsedCondition& condition){
+            const Value& row_value = row.get_value(condition.column_id);
+            switch(condition.comparison){
+                case sql::ComparisonOperator::EQUAL:
+                    return row_value == condition.value;
+                case sql::ComparisonOperator::LESS:
+                    return row_value < condition.value;
+                case sql::ComparisonOperator::GREATER:
+                    return row_value > condition.value;
+            }
+            throw ExecutionError("Unknown comparison operator");
+        };
+        //evaluate from left to right
+        bool res = evaluate(conditions[0]);
+        for(std::size_t i = 0; i < logical_operators.size(); ++i){
+            const bool next = evaluate(conditions[i + 1]);
+            if(logical_operators[i] == sql::LogicalOperator::AND){
+                res = res && next;
+            }else if(logical_operators[i] == sql::LogicalOperator::OR){
+                res = res || next;
+            }else{
+                throw ExecutionError("Unknown logical operator");
+            }
+        }
+        return res;
+    }
+    std::vector<std::size_t> Executor::parse_projection_columns(
+        const Table& table,
+        const sql::SQLCommand& command
+    ) const{
+        if(command.select_items.empty()){
+            throw ExecutionError("No columns specified in SELECT");
+        }
+        bool contains_all = false;
+        for(const auto& item : command.select_items){
+            if(item.type == sql::SelectType::ALL){
+                contains_all = true;
+                break;
+            }
+        }
+        //there is *
+        if(contains_all){
+            if(command.select_items.size() != 1){
+                throw ExecutionError("Cannot combine SELECT * with other SELECT items");
+            }
+            std::vector<std::size_t> res;
+            res.reserve(table.get_column_cnt());
+            for(std::size_t i = 0; i < table.get_column_cnt(); ++i){
+                res.push_back(i);
+            }
+            return res;
+        }
+        std::vector<std::size_t> res;
+        res.reserve(command.select_items.size());
+        for(const auto& item : command.select_items){
+            //aggregate functions are not supported yet
+            if(item.type == sql::SelectType::AGGREGATE){
+                throw ExecutionError("Aggregate functions are not supported yet");
+            }
+            //select certain column
+            if(item.type != sql::SelectType::COLUMN){
+                throw ExecutionError("Unknown SELECT item type");
+            }
+            const std::optional<std::size_t> column_id = table.get_column_id(item.column_name);
+            if(!column_id.has_value()){
+                throw ExecutionError("Column does not exist: " + item.column_name);
+            }
+            res.push_back(column_id.value());
+        }
+        return res;
+    }
+    ExecutionResult Executor::execute_select(const sql::SQLCommand& command) const{
+        const std::string& db_name = require_now_database();
+        const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
+        //group by is not supported yet
+        if(command.group_by_column.has_value()){
+            throw ExecutionError("GROUP BY is not supported yet");
+        }
+        //parse projections
+        const std::vector<std::size_t> projection_columns = parse_projection_columns(table,command);
+        //parse conditions
+        const std::vector<parsedCondition> conditions = parse_conditions(table,command);
+        const std::filesystem::path path = table_path(db_name,command.table_name);
+        std::error_code error;
+        bool path_exists = std::filesystem::exists(path,error);
+        if(error){
+            throw ExecutionError("failed to check if table data file exists: " + path.string() + ": " + error.message());
+        }
+        if(!path_exists){
+            throw ExecutionError("Table data file does not exist: " + path.string());
+        }
+        //open file
+        TableFile table_file{path};
+        const std::vector<TableFile::row_entry> entries = table_file.scan_all_rows();
+        ExecutionResult res{};
+        //get column names in result table
+        for(const std::size_t column_id : projection_columns){
+            res.columns.push_back(table.get_column(column_id).get_name());
+        }
+        //entry = offset + row in file
+        for(const auto& entry : entries){
+            //check if row matches conditions
+            if(!row_matches_conditions(
+                entry.row,
+                conditions,
+                command.logical_operators)){
+                continue;
+            }
+            //create row in result table
+            std::vector<std::string> output_row;
+            output_row.reserve(projection_columns.size());
+            for(const std::size_t column_id : projection_columns){
+                output_row.push_back(entry.row.get_value(column_id).to_string());
+            }
+            res.rows.push_back(std::move(output_row));
+        }
+        res.message = std::to_string(res.rows.size()) + " rows selected from table '" + table.get_name() + "'";
         return res;
     }
 }

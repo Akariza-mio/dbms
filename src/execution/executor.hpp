@@ -1,5 +1,6 @@
 #pragma once
 #include "core/catalog.hpp"
+#include "core/row.hpp"
 #include "sql/ast.hpp"
 #include <cstddef>
 #include <filesystem>
@@ -45,6 +46,24 @@ private:
     //insert
     [[nodiscard]] ExecutionResult execute_insert(const sql::SQLCommand& command);
     [[nodiscard]] std::vector<Value> normalize_insert_values(const Table& table,const std::vector<Value>& input) const;
-    
+    //select 
+    struct parsedCondition{
+        std::size_t column_id;
+        sql::ComparisonOperator comparison;
+        Value value;
+    };
+    [[nodiscard]] std::vector<parsedCondition> parse_conditions(const Table& table,const sql::SQLCommand& command) const;
+    //check if the row is matched with the conditions
+    [[nodiscard]] bool row_matches_conditions(
+        const Row& row,
+        const std::vector<parsedCondition>& conditions,
+        const std::vector<sql::LogicalOperator>& logical_operators
+    ) const;
+    //get column id of the column being selected
+    [[nodiscard]] std::vector<std::size_t> parse_projection_columns(
+        const Table& table,
+        const sql::SQLCommand& command
+    ) const;
+    [[nodiscard]] ExecutionResult execute_select(const sql::SQLCommand& command)const;
 };
 }
