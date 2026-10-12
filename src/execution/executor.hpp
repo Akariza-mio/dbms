@@ -14,11 +14,16 @@ class ExecutionError final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+enum class selectPath{
+    FULL_TABLE_SCAN,
+    PK_INDEX_SCAN
+};
 struct ExecutionResult {
     std::string message;
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
     std::size_t affected_rows = 0;
+    std::optional<selectPath> select_path;
 };
 class Executor {
 public:
@@ -65,5 +70,11 @@ private:
         const sql::SQLCommand& command
     ) const;
     [[nodiscard]] ExecutionResult execute_select(const sql::SQLCommand& command)const;
+    //find a condition that support B+ tree search
+    [[nodiscard]] std::optional<std::size_t> find_pk_equality_condition(
+        const Table& table,
+        const std::vector<parsedCondition>& conditions,
+        const std::vector<sql::LogicalOperator>& logical_operators
+    ) const;
 };
 }

@@ -615,8 +615,40 @@ namespace minidb {
         }
         //open file
         TableFile table_file{path};
-        const std::vector<TableFile::row_entry> entries = table_file.scan_all_rows();
+        std::vector<TableFile::row_entry> entries;
         ExecutionResult res{};
+        const std::optional<std::size_t> index_condition_id = find_pk_equality_condition(table,conditions,command.logical_operators);
+        //the select command can be used for B+ tree search
+        if(index_condition_id.has_value()){
+            //sign of select type
+            res.select_path = selectPath::PK_INDEX_SCAN;
+            const std::size_t pk_id = table.get_pk_id().value();
+            const Column& pk_column = table.get_column(pk_id);
+            const std::filesystem::path index_path = table_index_path(db_name,command.table_name);
+            error.clear();
+            const bool index_exists = std::filesystem::exists(index_path,error);
+            if(error){
+                throw ExecutionError("failed to check if table index file exists: " + index_path.string() + ": " + error.message());
+            }
+            if(!index_exists){
+                throw ExecutionError("table index file does not exist: " + index_path.string());
+            }
+            //open B+ tree index file
+            BPlusTree index{index_path,pk_column.get_type()};
+            const Value& key_value = conditions[index_condition_id.value()].value;
+            const std::optional<BPlusTree::row_offset> row_offset = index.search(key_value);
+            if(row_offset.has_value()){
+                entries.emplace_back(
+                    row_offset.value(),
+                    table_file.get_row(row_offset.value())
+                );
+            }
+        }else{
+            //sign of select type
+            res.select_path = selectPath::FULL_TABLE_SCAN;
+            //scan all rows in the table file
+            entries = table_file.scan_all_rows();
+        }
         //get column names in result table
         for(const std::size_t column_id : projection_columns){
             res.columns.push_back(table.get_column(column_id).get_name());
@@ -640,5 +672,29 @@ namespace minidb {
         }
         res.message = std::to_string(res.rows.size()) + " rows selected from table '" + table.get_name() + "'";
         return res;
+    }
+    std::optional<std::size_t> Executor::find_pk_equality_condition(
+        const Table& table,
+        const std::vector<parsedCondition>& conditions,
+        const std::vector<sql::LogicalOperator>& logical_operators
+    ) const{
+        //check if there is a primary key
+        const std::optional<std::size_t> pk_id = table.get_pk_id();
+        if(!pk_id.has_value()){
+            return std::nullopt;
+        }
+        //check if there is a OR operaotr
+        for(const auto& op : logical_operators){
+            if(op == sql::LogicalOperator::OR){
+                return std::nullopt;
+            }
+        }
+        //find condition like "pk = value"
+        for(std::size_t i = 0; i < conditions.size(); ++i){
+            if(conditions[i].column_id == pk_id.value() && conditions[i].comparison == sql::ComparisonOperator::EQUAL){
+                return i;
+            }
+        }
+        return std::nullopt;
     }
 }
