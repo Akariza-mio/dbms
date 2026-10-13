@@ -3,6 +3,7 @@
 #include "storage/b_plus_tree.hpp"
 #include <system_error>
 #include <utility>
+#include <set>
 
 namespace minidb {
     namespace {
@@ -90,7 +91,9 @@ namespace minidb {
                 case sql::CommandType::INSERT:
                     return execute_insert(command);
                 case sql::CommandType::DELETE:
+                    return execute_delete(command);
                 case sql::CommandType::UPDATE:
+                    return execute_update(command);
                 case sql::CommandType::SELECT:
                     return execute_select(command);
                 case sql::CommandType::ALTER_TABLE:
@@ -127,7 +130,7 @@ namespace minidb {
                 try{
                     catalog_.drop_database(db_name);
                 } catch (...){
-                    
+                    throw ExecutionError("failed to create database: " + db_name + " and failed to rollback catalog");
                 }
             }
             if(directory_created){
@@ -696,5 +699,282 @@ namespace minidb {
             }
         }
         return std::nullopt;
+    }
+    ExecutionResult Executor::execute_delete(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
+        const std::vector<parsedCondition> conditions = parse_conditions(table,command);
+        const std::filesystem::path data_path = table_path(db_name,command.table_name);
+        std::error_code error;
+        const bool data_exists = std::filesystem::exists(data_path,error);
+        if(error){
+            throw ExecutionError("failed to check if table data file exists: " + data_path.string() + ": " + error.message());
+        }
+        if(!data_exists){
+            throw ExecutionError("table data file does not exist: " + data_path.string());
+        }
+        //open file
+        TableFile table_file{data_path};
+        const std::optional<std::size_t> pk_id = table.get_pk_id();
+        std::optional<BPlusTree> index;
+        if(pk_id.has_value()){
+            //construct B+ tree
+            const Column& pk_column =table.get_column(pk_id.value());
+            const std::filesystem::path index_path = table_index_path(db_name, command.table_name);
+            error.clear();
+            const bool index_exists = std::filesystem::exists(index_path,error);
+            if(error){
+                throw ExecutionError("failed to check if table index file exists: " + index_path.string() + ": " + error.message());
+            }
+            if(!index_exists){
+                throw ExecutionError("table index file does not exist: " + index_path.string());
+            }
+            index.emplace(index_path,pk_column.get_type());
+        }
+        std::vector<TableFile::row_entry> active_rows;
+        const std::optional<std::size_t> index_condition_id = find_pk_equality_condition(table,conditions,command.logical_operators);
+        if(index_condition_id.has_value()){
+            //use index to find the row to delete
+            const Value& key = conditions[index_condition_id.value()].value;
+            const std::optional<BPlusTree::row_offset> row_offset = index->search(key);
+            if(row_offset.has_value()){
+                active_rows.emplace_back(
+                    row_offset.value(),
+                    table_file.get_row(row_offset.value())
+                );
+            }
+        }else{
+            active_rows = table_file.scan_all_rows();
+        }
+        std::vector<TableFile::row_entry> matched_rows;
+        //get rows to delete
+        for(const auto& entry : active_rows){
+            if(row_matches_conditions(
+                entry.row,
+                conditions,
+                command.logical_operators)){
+                matched_rows.push_back(entry);
+            }
+        }
+        std::size_t delete_cnt = 0;
+        if(!pk_id.has_value()){
+            //just make tomb if there is no primary key
+            for(const auto& entry : matched_rows){
+                table_file.delete_row(entry.offset);
+                ++delete_cnt;
+            }
+        }else{
+            for(const auto& entry : matched_rows){
+                const Value& pk_value = entry.row.get_value(pk_id.value());
+                //delete from B+ tree first
+                const bool erased = index.value().erase(pk_value);
+                if(!erased){
+                    throw ExecutionError("Failed to delete primary key from B+ tree index for value: " + pk_value.to_string());
+                }
+                try{
+                    table_file.delete_row(entry.offset);
+                }catch (const std::exception& delete_exception){
+                    //rollback the B+ tree deletion if .dat deletion fails
+                    try{
+                        index.value().insert(pk_value,entry.offset);
+                    }catch (const std::exception& rollback_exception){
+                        throw ExecutionError("Failed to delete row from .dat file: " + std::string(delete_exception.what()) + "; Failed to rollback B+ tree index: " + rollback_exception.what());
+                    }
+                    throw ExecutionError("Failed to delete row from .dat file: " + std::string(delete_exception.what()));
+                }
+                ++delete_cnt;
+            }
+        }
+        ExecutionResult res{};
+        res.affected_rows = delete_cnt;
+        res.message = std::to_string(res.affected_rows) + " rows deleted from table '" + table.get_name() + "'";
+        return res;
+    }
+    std::vector<Executor::parsedAssignment> Executor::parse_assignments(const Table& table,const sql::SQLCommand& command) const{
+        if(command.assignments.empty()){
+            throw ExecutionError("No assignments specified in UPDATE");
+        }
+        std::vector<parsedAssignment> res;
+        res.reserve(command.assignments.size());
+        std::vector<bool> assigned(table.get_column_cnt(),false);
+        for(const auto& assignment : command.assignments){
+            const std::optional<std::size_t> column_id = table.get_column_id(assignment.column_name);
+            if(!column_id.has_value()){
+                throw ExecutionError("column does not exist: " + assignment.column_name);
+            }
+            //check dupilicate assignment
+            if(assigned[column_id.value()]){
+                throw ExecutionError("column '" + assignment.column_name + "' is assigned multiple times");
+            }
+            assigned[column_id.value()] = true;
+            const Column& column = table.get_column(column_id.value());
+            const DataType expected_type = column.get_type();
+            const DataType actual_type = assignment.value.get_type();
+            if(expected_type == actual_type){
+                res.emplace_back(column_id.value(),assignment.value);
+                continue;
+            }
+            //FLOAT can be assigned from INT
+            if(expected_type == DataType::FLOAT && actual_type == DataType::INT){
+                res.emplace_back(column_id.value(),Value(static_cast<double>(assignment.value.as_int())));
+                continue;
+            }
+            throw ExecutionError("incompatible types for column '" + assignment.column_name + "': expected " + data_type_name(expected_type) + ", got " + data_type_name(actual_type));
+        }
+        return res;
+    }
+    Row Executor::apply_assignments(
+        const Row& row,
+        const std::vector<parsedAssignment>& assignments
+    ) const{
+        std::vector<Value> new_values = row.get_values();
+        for(const auto& assignment : assignments){
+            new_values[assignment.column_id] = assignment.value;
+        }
+        return Row{std::move(new_values)};
+    }
+    ExecutionResult Executor::execute_update(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
+        const std::vector<parsedAssignment> assignments = parse_assignments(table, command);
+        const std::vector<parsedCondition> conditions = parse_conditions(table, command);
+        const std::filesystem::path data_path = table_path(db_name, command.table_name);
+        std::error_code error;
+        const bool data_exists = std::filesystem::exists(data_path, error);
+        if (error) {
+            throw ExecutionError("failed to check table data file: " + data_path.string() + ": " + error.message());
+        }
+        if (!data_exists) {
+            throw ExecutionError("table data file does not exist: " + data_path.string());
+        }
+        TableFile table_file{data_path};
+        //open B+ tree index if primary key exists
+        const std::optional<std::size_t> pk_id = table.get_pk_id();
+        std::optional<BPlusTree> index;
+        if(pk_id.has_value()){
+            //construct B+ tree
+            const Column& pk_cloumn = table.get_column(pk_id.value());
+            const std::filesystem::path index_path = table_index_path(db_name, command.table_name);
+            error.clear();
+            const bool index_exists = std::filesystem::exists(index_path,error);
+            if(error){
+                throw ExecutionError("failed to check if table index file exists: " + index_path.string() + ": " + error.message());
+            }
+            if(!index_exists){
+                throw ExecutionError("table index file does not exist: " + index_path.string());
+            }
+            index.emplace(index_path,pk_cloumn.get_type());
+        }
+        std::vector<TableFile::row_entry> candidate_rows;
+        //use B+ tree index if possible
+        const std::optional<std::size_t> index_conditon_id = find_pk_equality_condition(table,conditions,command.logical_operators);
+        if(index_conditon_id.has_value()){
+            const Value& key_value = conditions[index_conditon_id.value()].value;
+            const std::optional<BPlusTree::row_offset> row_offset = index->search(key_value);
+            if(row_offset.has_value()){
+                candidate_rows.emplace_back(
+                    row_offset.value(),
+                    table_file.get_row(row_offset.value())
+                );
+            }
+        }else{
+            candidate_rows = table_file.scan_all_rows();
+        }
+        //create new rows
+        struct updatingRow{
+            TableFile::Row_offset old_offset;
+            Row old_row;
+            Row new_row;
+        };
+        std::vector<updatingRow> updating_rows;
+        for(const auto& entry : candidate_rows){
+            if(!row_matches_conditions(
+                entry.row,
+                conditions,
+                command.logical_operators)){
+                continue;
+            }
+            //new rows
+            updating_rows.push_back({entry.offset,entry.row,apply_assignments(entry.row,assignments)});
+        }
+        if(pk_id.has_value()){
+            std::set<Value> new_pk_values;
+            for(const auto& updating_row : updating_rows){
+                const Value& old_pk_value = updating_row.old_row.get_value(pk_id.value());
+                const Value& new_pk_value = updating_row.new_row.get_value(pk_id.value());
+                //check if the old offset and offset in index matches
+                const std::optional<BPlusTree::row_offset> old_index_offset = index->search(old_pk_value);
+                if(!old_index_offset.has_value() || old_index_offset.value() != updating_row.old_offset){
+                    throw ExecutionError("Primary key index is inconsistent with table data for value: " + old_pk_value.to_string());
+                }
+                //check if the new primary key value is unique
+                const bool inserted = new_pk_values.insert(new_pk_value).second;
+                if(!inserted){
+                    throw ExecutionError("Duplicate primary key value in UPDATE assignments: " + new_pk_value.to_string());
+                }
+                //check if the new primary key value already exists in the table
+                const std::optional<BPlusTree::row_offset> existing_offset = index->search(new_pk_value);
+                if(existing_offset.has_value() && existing_offset.value() != updating_row.old_offset){
+                    throw ExecutionError("Duplicate primary key value in table for UPDATE assignments: " + new_pk_value.to_string());
+                }
+            }
+        }
+        std::size_t updated_cnt = 0;
+        for(const auto& update : updating_rows){
+            const TableFile::Row_offset new_offset = table_file.insert_row(update.new_row);
+            bool old_index_removed = false;
+            bool new_index_inserted = false;
+            try{
+                if(pk_id.has_value()){
+                    const Value& old_pk_value = update.old_row.get_value(pk_id.value());
+                    const Value& new_pk_value = update.new_row.get_value(pk_id.value());
+                    //remove old primary key from B+ tree
+                    const bool erased = index->erase(old_pk_value);
+                    if(!erased){
+                        throw ExecutionError("Failed to remove old primary key from B+ tree index for value: " + old_pk_value.to_string());
+                    }
+                    old_index_removed = true;
+                    //insert new primary key into B+ tree
+                    index->insert(new_pk_value,new_offset);
+                    new_index_inserted = true;
+                }
+                table_file.delete_row(update.old_offset);
+                ++updated_cnt;
+            }catch (const std::exception& exception){
+                //rollback if any error occurs
+                std::error_code rollback_error;
+                if(pk_id.has_value()){
+                    const Value& old_pk_value = update.old_row.get_value(pk_id.value());
+                    const Value& new_pk_value = update.new_row.get_value(pk_id.value());
+                    if(new_index_inserted){
+                        try{
+                            const bool erased = index->erase(new_pk_value);
+                            if(!erased){
+                                throw ExecutionError("Failed to rollback B+ tree index for value: " + new_pk_value.to_string());
+                            }
+                        }catch(const std::exception& rollback_exception){
+                            throw ExecutionError("Failed to update row: " + std::string(exception.what()) + "; Failed to rollback B+ tree index: " + rollback_exception.what());
+                        }
+                    }
+                    if(old_index_removed){
+                        try{
+                            index->insert(old_pk_value,update.old_offset);
+                        }catch(const std::exception& rollback_exception){
+                            throw ExecutionError("Failed to update row: " + std::string(exception.what()) + "; Failed to rollback B+ tree index: " + rollback_exception.what());
+                        }
+                    }
+                }
+                try{
+                    table_file.delete_row(new_offset);
+                }catch(const std::exception& rollback_exception){
+                    throw ExecutionError("Failed to update row: " + std::string(exception.what()) + "; Failed to rollback .dat file: " + rollback_exception.what());
+                }
+                throw ExecutionError("Failed to update row: " + std::string(exception.what()));
+            }
+        }
+        ExecutionResult res{};
+        res.affected_rows = updated_cnt;
+        res.message = std::to_string(res.affected_rows) + " rows updated in table '" + table.get_name() + "'";
+        return res;
     }
 }

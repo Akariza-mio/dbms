@@ -76,5 +76,18 @@ private:
         const std::vector<parsedCondition>& conditions,
         const std::vector<sql::LogicalOperator>& logical_operators
     ) const;
+    // update
+    struct parsedAssignment{
+        std::size_t column_id;
+        Value value;
+    };
+    [[nodiscard]] std::vector<parsedAssignment> parse_assignments(const Table& table,const sql::SQLCommand& command) const;
+    [[nodiscard]] ExecutionResult execute_update(const sql::SQLCommand& command);
+    [[nodiscard]] Row apply_assignments(
+        const Row& row,
+        const std::vector<parsedAssignment>& assignments
+    ) const;
+    // delete
+    [[nodiscard]] ExecutionResult execute_delete(const sql::SQLCommand& command);
 };
 }
