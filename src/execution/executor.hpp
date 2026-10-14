@@ -89,5 +89,18 @@ private:
     ) const;
     // delete
     [[nodiscard]] ExecutionResult execute_delete(const sql::SQLCommand& command);
+    //aggregate function AND group by
+    struct parsedSelectItem{
+        std::size_t column_id;
+        sql::AggregateType aggregate_type;
+        std::string output_name;
+    };
+    struct aggregatePlan{
+        std::vector<parsedSelectItem> items;
+        std::optional<std::size_t> group_by_column_id;
+        bool has_aggregate = false;
+    };
+    [[nodiscard]] aggregatePlan create_aggregate_plan(const Table& table,const sql::SQLCommand& command) const;
+    [[nodiscard]] std::string calculate_aggregate(const parsedSelectItem& item,const std::vector<const Row*>& rows) const;
 };
 }

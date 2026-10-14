@@ -4,6 +4,7 @@
 #include <system_error>
 #include <utility>
 #include <set>
+#include <map>
 
 namespace minidb {
     namespace {
@@ -17,6 +18,21 @@ namespace minidb {
                     return "STRING";
             }
             throw std::logic_error("Unknown DataType");
+        }
+        const char* aggregate_function_name(sql::AggregateType type){
+            switch(type){
+                case sql::AggregateType::COUNT:
+                    return "COUNT";
+                case sql::AggregateType::AVG:
+                    return "AVG";
+                case sql::AggregateType::MIN:
+                    return "MIN";
+                case sql::AggregateType::MAX:
+                    return "MAX";
+                case sql::AggregateType::NONE:
+                    return "NONE";
+            }
+            throw std::logic_error("Unknown AggregateType");
         }
     }
     Executor::Executor(const std::filesystem::path& data_directory)
@@ -599,12 +615,21 @@ namespace minidb {
     ExecutionResult Executor::execute_select(const sql::SQLCommand& command) const{
         const std::string& db_name = require_now_database();
         const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
-        //group by is not supported yet
-        if(command.group_by_column.has_value()){
-            throw ExecutionError("GROUP BY is not supported yet");
+        //check if the select command is an aggregate query
+        bool is_aggregate_query = command.group_by_column.has_value();
+        for(const sql::SelectItem& item : command.select_items){
+            if(item.type == sql::SelectType::AGGREGATE){
+                is_aggregate_query = true;
+                break;
+            }
         }
-        //parse projections
-        const std::vector<std::size_t> projection_columns = parse_projection_columns(table,command);
+        std::vector<std::size_t> projection_columns;
+        std::optional<aggregatePlan> aggregate_plan;
+        if(is_aggregate_query){
+            aggregate_plan = create_aggregate_plan(table,command);
+        }else{
+            projection_columns = parse_projection_columns(table,command);
+        }
         //parse conditions
         const std::vector<parsedCondition> conditions = parse_conditions(table,command);
         const std::filesystem::path path = table_path(db_name,command.table_name);
@@ -652,24 +677,73 @@ namespace minidb {
             //scan all rows in the table file
             entries = table_file.scan_all_rows();
         }
+        std::vector<const Row*> matched_rows;
+        matched_rows.reserve(entries.size());
+        for(const auto& entry : entries){
+            if(row_matches_conditions(
+                entry.row,
+                conditions,
+                command.logical_operators)){
+                matched_rows.push_back(&entry.row);
+            }
+        }
+        if(aggregate_plan.has_value()){
+            //execute aggregate query
+            const aggregatePlan& plan = aggregate_plan.value();
+            //get column names in result table
+            for(const parsedSelectItem& item : plan.items){
+                res.columns.push_back(item.output_name);
+            }
+            //NO GROUP BY
+            if(!plan.group_by_column_id.has_value()){
+                std::vector<std::string> output_row;
+                output_row.reserve(plan.items.size());
+                for(const parsedSelectItem& item : plan.items){
+                    if(item.aggregate_type == sql::AggregateType::NONE){
+                        throw ExecutionError("no aggregate function in query");
+                    }
+                    output_row.push_back(calculate_aggregate(item,matched_rows));
+                }
+                res.rows.push_back(std::move(output_row));
+                res.message = std::to_string(res.rows.size()) + " rows selected from table '" + table.get_name() + "'";
+                return res;
+            }
+            //GROUP BY
+            const std::size_t group_column_id = plan.group_by_column_id.value();
+            /*  key = group by column value
+                value = all rows belonging to this group  */
+            std::map<Value,std::vector<const Row*>> groups;
+            for(const Row* row : matched_rows){
+                const Value& group_key = row->get_value(group_column_id);
+                groups[group_key].push_back(row);
+            }
+            for(const auto& [group_key,group_rows] : groups){
+                std::vector<std::string> output_row;
+                output_row.reserve(plan.items.size());
+                for(const parsedSelectItem& item : plan.items){
+                    if(item.aggregate_type == sql::AggregateType::NONE){
+                        //group-by column
+                        output_row.push_back(group_key.to_string());
+                    }else{
+                        output_row.push_back(calculate_aggregate(item,group_rows));
+                    }
+                }
+                res.rows.push_back(std::move(output_row));
+            }
+            res.message = std::to_string(res.rows.size()) + " rows selected from table '" + table.get_name() + "'";
+            return res;
+        }
         //get column names in result table
         for(const std::size_t column_id : projection_columns){
             res.columns.push_back(table.get_column(column_id).get_name());
         }
         //entry = offset + row in file
-        for(const auto& entry : entries){
-            //check if row matches conditions
-            if(!row_matches_conditions(
-                entry.row,
-                conditions,
-                command.logical_operators)){
-                continue;
-            }
+        for(const Row* row : matched_rows){
             //create row in result table
             std::vector<std::string> output_row;
             output_row.reserve(projection_columns.size());
             for(const std::size_t column_id : projection_columns){
-                output_row.push_back(entry.row.get_value(column_id).to_string());
+                output_row.push_back(row->get_value(column_id).to_string());
             }
             res.rows.push_back(std::move(output_row));
         }
@@ -976,5 +1050,111 @@ namespace minidb {
         res.affected_rows = updated_cnt;
         res.message = std::to_string(res.affected_rows) + " rows updated in table '" + table.get_name() + "'";
         return res;
+    }
+    Executor::aggregatePlan Executor::create_aggregate_plan(const Table& table,const sql::SQLCommand& command) const{
+        if(command.select_items.empty()){
+            throw ExecutionError("No columns specified in SELECT");
+        }
+        aggregatePlan plan{};
+        //check if there is a aggregate function
+        for(const auto& item : command.select_items){
+            if(item.type == sql::SelectType::AGGREGATE){
+                plan.has_aggregate = true;
+            }
+        }
+        //convert column name to column id
+        if(command.group_by_column.has_value()){
+            const std::optional<std::size_t> group_by_column_id = table.get_column_id(command.group_by_column.value());
+            if(!group_by_column_id.has_value()){
+                throw ExecutionError("Group by column does not exist: " + command.group_by_column.value());
+            }
+            plan.group_by_column_id = group_by_column_id.value();
+        }
+        plan.items.reserve(command.select_items.size());
+        for(const auto& item : command.select_items){
+            //reject * with aggregate functions
+            if(item.type == sql::SelectType::ALL){
+                throw ExecutionError("SELECT * is not allowed with aggregate functions");
+            }
+            const std::optional<std::size_t> column_id = table.get_column_id(item.column_name);
+            if(!column_id.has_value()){
+                throw ExecutionError("Column does not exist: " + item.column_name);
+            }
+            const Column& column = table.get_column(column_id.value());
+            if(item.type == sql::SelectType::COLUMN){
+                //reject normal column when aggregate exists and group by does not exists
+                if(plan.has_aggregate && !command.group_by_column.has_value()){
+                    throw ExecutionError("Normal column '" + column.get_name() + "' is not allowed with aggregate functions when GROUP BY is not specified");
+                }
+                //if group by exists,the column must be the group by column
+                if(plan.group_by_column_id.has_value() && column_id.value() != plan.group_by_column_id.value()){
+                    throw ExecutionError("Normal column '" + column.get_name() + "' is not allowed with aggregate functions when GROUP BY is specified on a different column");
+                }
+                plan.items.emplace_back(column_id.value(),sql::AggregateType::NONE,column.get_name());
+                continue;
+            }
+            if(item.type == sql::SelectType::AGGREGATE){
+                if(item.aggregate == sql::AggregateType::NONE){
+                    throw ExecutionError("Invalid aggregate function");
+                }
+                // STRING can only be used with COUNT aggregate function
+                if(item.aggregate != sql::AggregateType::COUNT && column.get_type() == DataType::STRING){
+                    throw ExecutionError("Aggregate function '" + std::string(aggregate_function_name(item.aggregate)) + "' is not allowed on STRING column '" + column.get_name() + "'");
+                }
+                const std::string output_name = std::string(aggregate_function_name(item.aggregate)) + "(" + column.get_name() + ")";
+                plan.items.emplace_back(column_id.value(),item.aggregate,output_name);
+                continue;
+            }
+            throw ExecutionError("Unknown SELECT item type");
+        }
+        return plan;
+    }
+    std::string Executor::calculate_aggregate(const parsedSelectItem& item,const std::vector<const Row*>& rows) const{
+        //COUNT = number of rows
+        if(item.aggregate_type == sql::AggregateType::COUNT){
+            return std::to_string(rows.size());
+        }
+        if(rows.empty()){
+            return "NULL";
+        }
+        //MAX
+        if(item.aggregate_type == sql::AggregateType::MAX){
+            const Value* max_value = &rows[0]->get_value(item.column_id);
+            for(const Row* row : rows){
+                const Value& value = row->get_value(item.column_id);
+                if(value > *max_value){
+                    max_value = &value;
+                }
+            }
+            return max_value->to_string();
+        }
+        //MIN
+        if(item.aggregate_type == sql::AggregateType::MIN){
+            const Value* min_value = &rows[0]->get_value(item.column_id);
+            for(const Row* row : rows){
+                const Value& value = row->get_value(item.column_id);
+                if(value < *min_value){
+                    min_value = &value;
+                }
+            }
+            return min_value->to_string();
+        }
+        //AVG
+        if(item.aggregate_type == sql::AggregateType::AVG){
+            double sum = 0.0;
+            for(const Row* row : rows){
+                const Value& value = row->get_value(item.column_id);
+                if(value.get_type() == DataType::INT){
+                    sum += static_cast<double>(value.as_int());
+                }else if(value.get_type() == DataType::FLOAT){
+                    sum += value.as_float();
+                }else{
+                    throw ExecutionError("AVG aggregate function is not allowed on STRING column");
+                }
+            }
+            const double avg = sum / static_cast<double>(rows.size());
+            return std::to_string(avg);
+        }
+        throw ExecutionError("Unknown aggregate function");
     }
 }
