@@ -113,7 +113,7 @@ namespace minidb {
                 case sql::CommandType::SELECT:
                     return execute_select(command);
                 case sql::CommandType::ALTER_TABLE:
-                    throw ExecutionError("Command type not implemented yet");
+                    return execute_alter_table(command);
             }
             throw ExecutionError("Unknown command type");
         }catch (const ExecutionError&){
@@ -1156,5 +1156,617 @@ namespace minidb {
             return std::to_string(avg);
         }
         throw ExecutionError("Unknown aggregate function");
+    }
+    ExecutionResult Executor::execute_alter_table(const sql::SQLCommand& command){
+        if(!command.alter_type.has_value()){
+            throw ExecutionError("No column specified for ALTER TABLE");
+        }
+        switch(command.alter_type.value()){
+            case sql::AlterType::RENAME_COLUMN:
+                return execute_rename_column(command);
+            case sql::AlterType::RENAME_TABLE:
+                return execute_rename_table(command);
+            case sql::AlterType::ADD_COLUMN:
+                return execute_add_column(command);
+            case sql::AlterType::DROP_COLUMN:
+                return execute_drop_column(command);
+        }
+        throw ExecutionError("Unknown ALTER TABLE type");
+    }
+    ExecutionResult Executor::execute_rename_column(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        if(!command.target_column_name.has_value() || !command.new_name.has_value()){
+            throw ExecutionError("No target column name specified for RENAME COLUMN");
+        }
+        const std::string& old_column_name = command.target_column_name.value();
+        const std::string& new_column_name = command.new_name.value();
+        const Table& old_table = catalog_.get_database(db_name).get_table(command.table_name);
+        const std::optional<std::size_t> column_id = old_table.get_column_id(old_column_name);
+        if(!column_id.has_value()){
+            throw ExecutionError("Column does not exist: " + old_column_name);
+        }
+        //check if the new column name already exists
+        const std::optional<std::size_t> exist_id = old_table.get_column_id(new_column_name);
+        if(exist_id.has_value() && exist_id.value() != column_id.value()){
+            throw ExecutionError("Column already exists: " + new_column_name);
+        }
+        std::vector<Column> new_columns = old_table.get_columns();
+        const Column& old_column = new_columns[column_id.value()];
+        //construct new column with the new name
+        new_columns[column_id.value()] = Column{new_column_name,old_column.get_type(),old_column.is_primary_key()};
+        Table replacement{old_table.get_name(),std::move(new_columns)};
+        const Catalog catalog_backup = catalog_;
+        try{
+            catalog_.replace_table(db_name,old_table.get_name(),std::move(replacement));
+            save_catalog();
+        }catch(...){
+            catalog_ = catalog_backup;
+            throw;
+        }
+        ExecutionResult res{};
+        res.message = "Column '" + old_column_name + "' renamed to '" + new_column_name + "' in table '" + old_table.get_name() + "'";
+        return res;
+    }
+    ExecutionResult Executor::execute_rename_table(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        if(!command.new_name.has_value()){
+            throw ExecutionError("No new table name specified for RENAME TABLE");
+        }
+        const std::string old_name = command.table_name;
+        const std::string new_name = command.new_name.value();
+        const Database& database = catalog_.get_database(db_name);
+        const Table& old_table = database.get_table(old_name);
+        //support renaming to the same name
+        if(old_name == new_name){
+            ExecutionResult res{};
+            res.message = "Table '" + old_name + "' renamed to '" + new_name + "' in database '" + db_name + "'";
+            return res;
+        }
+        if(database.get_table_id(new_name).has_value()){
+            throw ExecutionError("Table already exists: " + new_name);
+        }
+        //construct replacement
+        Table replacement{new_name,old_table.get_columns()};
+        const bool has_index = old_table.get_pk_id().has_value();
+        const std::filesystem::path old_data_path = table_path(db_name,old_name);
+        const std::filesystem::path new_data_path = table_path(db_name,new_name);
+        const std::filesystem::path old_index_path = table_index_path(db_name,old_name);
+        const std::filesystem::path new_index_path = table_index_path(db_name,new_name);
+        //temparory function to check if a path exists
+        const auto path_exists = [](const std::filesystem::path& path){
+            std::error_code error;
+            const bool exists = std::filesystem::exists(path,error);
+            if(error){
+                throw ExecutionError("failed to check if file exists: " + path.string() + ": " + error.message());
+            }
+            return exists;
+        };
+        if(!path_exists(old_data_path)){
+            throw ExecutionError("Table data file does not exist: " + old_data_path.string());
+        }
+        if(path_exists(new_data_path)){
+            throw ExecutionError("Table data file already exists: " + new_data_path.string());
+        }
+        if(has_index && !path_exists(old_index_path)){
+            throw ExecutionError("Table index file does not exist: " + old_index_path.string());
+        }
+        if(path_exists(new_index_path)){
+            throw ExecutionError("Table index file already exists: " + new_index_path.string());
+        }
+        //backup catalog
+        const Catalog catalog_backup = catalog_;
+        bool data_renamed = false;
+        bool index_renamed = false;
+        try{
+            std::error_code error;
+            std::filesystem::rename(old_data_path,new_data_path,error);
+            if(error){
+                throw ExecutionError("Failed to rename table data file: " + old_data_path.string() + " to " + new_data_path.string() + ": " + error.message());
+            }
+            data_renamed = true;
+            if(has_index){
+                error.clear();
+                std::filesystem::rename(old_index_path,new_index_path,error);
+                if(error){
+                    throw ExecutionError("Failed to rename table index file: " + old_index_path.string() + " to " + new_index_path.string() + ": " + error.message());
+                }
+                index_renamed = true;
+            }
+            catalog_.replace_table(db_name,old_name,std::move(replacement));
+            save_catalog();
+        }catch(const std::exception& exception){
+            //rollback if any error occurs
+            catalog_ = catalog_backup;
+            std::string rollback_error;
+            const auto append_rollback_error = [&rollback_error](const std::string& msg){
+                if(!rollback_error.empty()){
+                    rollback_error += "; ";
+                }
+                rollback_error += msg;
+            };
+            std::error_code re;
+            //recover data file
+            if(index_renamed){
+                std::filesystem::rename(new_index_path,old_index_path,re);
+                if(re){
+                    append_rollback_error("Failed to rollback table index file: " + re.message());
+                }
+            }
+            re.clear();
+            if(data_renamed){
+                std::filesystem::rename(new_data_path,old_data_path,re);
+                if(re){
+                    append_rollback_error("Failed to rollback table data file: " + re.message());
+                }
+            }
+            std::string msg = "Failed to rename table '" + old_name + "' to '" + new_name + "': " + exception.what();
+            if(!rollback_error.empty()){
+                msg += "; Rollback error: " + rollback_error;
+            }
+            throw ExecutionError(msg);
+        }
+        ExecutionResult res{};
+        res.message = "Table '" + old_name + "' renamed to '" + new_name + "' in database '" + db_name + "'";
+        return res;
+    }
+    ExecutionResult Executor::execute_add_column(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        if(!command.alter_column.has_value()){
+            throw ExecutionError("No column specified for ADD COLUMN");
+        }
+        const sql::ColumnDefinition& definition = command.alter_column.value();
+        const Table& old_table = catalog_.get_database(db_name).get_table(command.table_name);
+        //check if the column already exists
+        if(old_table.get_column_id(definition.name).has_value()){
+            throw ExecutionError("Column already exists: " + definition.name);
+        }
+        std::vector<Column> new_columns = old_table.get_columns();
+        new_columns.emplace_back(definition.name,definition.type,false);
+        Table replacement{old_table.get_name(),std::move(new_columns)};
+        //prepare default value for the every old row
+        auto make_default_value = [&definition](){
+            switch(definition.type){
+                case DataType::INT:
+                    return Value(0);
+                case DataType::FLOAT:
+                    return Value(0.0);
+                case DataType::STRING:
+                    return Value(std::string{});
+            }
+            throw ExecutionError("Unknown data type for ADD COLUMN ");
+        };
+        const std::optional<std::size_t> pk_id = old_table.get_pk_id();
+        const std::filesystem::path data_path = table_path(db_name,command.table_name);
+        const std::filesystem::path index_path = table_index_path(db_name,command.table_name);
+        //create new data and index file paths
+        std::filesystem::path new_data_path = data_path;
+        new_data_path += ".alter_new";
+        std::filesystem::path new_index_path = index_path;
+        new_index_path += ".alter_new";
+        const auto path_exists = [](const std::filesystem::path& path){
+            std::error_code error;
+            const bool exists = std::filesystem::exists(path,error);
+            if(error){
+                throw ExecutionError("failed to check if file exists: " + path.string() + ": " + error.message()); 
+            }
+            return exists;
+        };
+        if(!path_exists(data_path)){
+            throw ExecutionError("Table data file does not exist: " + data_path.string());
+        }
+        if(pk_id.has_value() && !path_exists(index_path)){
+            throw ExecutionError("Table index file does not exist: " + index_path.string());
+        }
+        if(path_exists(new_data_path)){
+            throw ExecutionError("Temporary table data file already exists: " + new_data_path.string());
+        }
+        if(path_exists(new_index_path)){
+            throw ExecutionError("Temporary table index file already exists: " + new_index_path.string());
+        }
+        //create temporary new data and index files
+        std::size_t rewritten_rows = 0;
+        //rename original files
+        std::filesystem::path backup_data_path = data_path;
+        backup_data_path += ".alter_old";
+        std::filesystem::path backup_index_path = index_path;
+        backup_index_path += ".alter_old";
+        if(path_exists(backup_data_path)){
+            throw ExecutionError(
+            "Temporary backup data file already exists: " +
+                backup_data_path.string()
+            );
+        }
+        if(pk_id.has_value() && path_exists(backup_index_path)){
+            throw ExecutionError(
+            "Temporary backup index file already exists: " +
+                backup_index_path.string()
+            );
+        }
+        try{
+            TableFile old_file{data_path};
+            std::vector<TableFile::row_entry> old_rows = old_file.scan_all_rows();
+            TableFile new_file{new_data_path};
+            std::optional<BPlusTree> new_index;
+            if(pk_id.has_value()){
+                const DataType pk_type = old_table.get_column(pk_id.value()).get_type();
+                new_index.emplace(new_index_path,pk_type);
+            }
+            for(const auto& entry : old_rows){
+                //copy all values from old row
+                std::vector<Value> new_values = entry.row.get_values();
+                new_values.push_back(make_default_value());
+                Row new_row{std::move(new_values)};
+                //the offset can be diffferent between the old and new file
+                //we must get the new offset and use it
+                const TableFile::Row_offset new_offset = new_file.insert_row(new_row);
+                if(new_index.has_value()){
+                    const Value& pk_value = new_row.get_value(pk_id.value());
+                    new_index->insert(pk_value,new_offset);
+                }
+                ++rewritten_rows;
+            }
+        }catch(const std::exception& exception){
+            //rollback if any error occurs
+            std::error_code rollback_error;
+            std::filesystem::remove(new_data_path,rollback_error);
+            if(rollback_error){
+                throw ExecutionError("Failed to prepare files for ADD COLUMN: " + std::string(exception.what()) + "; Failed to remove temporary new table data file: " + rollback_error.message());
+            }
+            rollback_error.clear();
+            std::filesystem::remove(new_index_path,rollback_error);
+            if(rollback_error){
+                throw ExecutionError("Failed to prepare files for ADD COLUMN: " + std::string(exception.what()) + "; Failed to remove temporary new table index file: " + rollback_error.message());
+            }
+            throw ExecutionError("Failed to prepare files for ADD COLUMN: " + std::string(exception.what()));
+        }
+        const Catalog catalog_backup = catalog_;
+        bool old_data_backed_up = false;
+        bool old_index_backed_up = false;
+        bool new_data_installed = false;
+        bool new_index_installed = false;
+        try{
+            //backup original files with renaming them
+            std::error_code error;
+            std::filesystem::rename(data_path,backup_data_path,error);
+            if(error){
+                throw ExecutionError("Failed to backup table data file: " + data_path.string() + " to " + backup_data_path.string() + ": " + error.message());
+            }
+            old_data_backed_up = true;
+            if(pk_id.has_value()){
+                error.clear();
+                std::filesystem::rename(index_path,backup_index_path,error);
+                if(error){
+                    throw ExecutionError("Failed to backup table index file: " + index_path.string() + " to " + backup_index_path.string() + ": " + error.message());
+                }
+                old_index_backed_up = true;
+            }
+            // install new files by renaming them
+            error.clear();
+            std::filesystem::rename(new_data_path,data_path,error);
+            if(error){
+                throw ExecutionError("Failed to install new table data file: " + new_data_path.string() + " to " + data_path.string() + ": " + error.message());
+            }
+            new_data_installed = true;
+            if(pk_id.has_value()){
+                error.clear();
+                std::filesystem::rename(new_index_path,index_path,error);
+                if(error){
+                    throw ExecutionError("Failed to install new table index file: " + new_index_path.string() + " to " + index_path.string() + ": " + error.message());
+                }
+                new_index_installed = true;
+            }
+            catalog_.replace_table(db_name,command.table_name,std::move(replacement));
+            save_catalog();
+        }catch(const std::exception& exception){
+            //rollback if any error occurs
+            catalog_ = catalog_backup;
+            std::string rollback_error;
+            const auto append_rollback_error = [&rollback_error](const std::string& msg){
+                if(!rollback_error.empty()){
+                    rollback_error += "; ";
+                }
+                rollback_error += msg;
+            };
+            std::error_code re;
+            //recover original files
+            if(new_index_installed){
+                std::filesystem::remove(index_path,re);
+                if(re){
+                    append_rollback_error("Failed to remove new table index file: " + re.message());
+                }
+            }
+            re.clear();
+            if(new_data_installed){
+                std::filesystem::remove(data_path,re);
+                if(re){
+                    append_rollback_error("Failed to remove new table data file: " + re.message());
+                }
+            }
+            re.clear();
+            if(old_index_backed_up){
+                std::filesystem::rename(backup_index_path,index_path,re);
+                if(re){
+                    append_rollback_error("Failed to restore original table index file: " + re.message());
+                }
+            }
+            re.clear();
+            if(old_data_backed_up){
+                std::filesystem::rename(backup_data_path,data_path,re);
+                if(re){
+                    append_rollback_error("Failed to restore original table data file: " + re.message());
+                }
+            }
+            re.clear();
+            //remove temporary new files if they still exist
+            std::filesystem::remove(new_data_path,re);
+            if(re){
+                append_rollback_error("Failed to remove temporary new table data file: " + re.message());
+            }
+            re.clear();
+            std::filesystem::remove(new_index_path,re);
+            if(re){
+                append_rollback_error("Failed to remove temporary new table index file: " + re.message());
+            }
+            std::string msg = "Failed to add column '" + definition.name  + "' :" + exception.what();
+            if(!rollback_error.empty()){
+                msg += "; Rollback error: " + rollback_error;
+            }
+            throw ExecutionError(msg);
+        }
+        //remove backup files if everything is successful
+        std::string cleanup_warning;
+        std::error_code cleanup_error;
+        std::filesystem::remove(backup_data_path,cleanup_error);
+        if(cleanup_error){
+            cleanup_warning += "Failed to remove backup table data file: " + cleanup_error.message();
+        }
+        if(pk_id.has_value()){
+            cleanup_error.clear();
+            std::filesystem::remove(backup_index_path,cleanup_error);
+            if(cleanup_error){
+                if(!cleanup_warning.empty()){
+                    cleanup_warning += "; ";
+                }
+                cleanup_warning += "Failed to remove backup table index file: " + cleanup_error.message();
+            }
+        }
+        ExecutionResult res{};
+        res.affected_rows = rewritten_rows;
+        res.message = "Column '" + definition.name + "' added to table '" + command.table_name + "';" + std::to_string(rewritten_rows) + " rows rewritten";
+        if(!cleanup_warning.empty()){
+            res.message += "; Warning: " + cleanup_warning;
+        }
+        return res;
+    }
+    ExecutionResult Executor::execute_drop_column(const sql::SQLCommand& command){
+        const std::string& db_name = require_now_database();
+        if(!command.target_column_name.has_value()){
+            throw ExecutionError("No target column name specified for DROP COLUMN");
+        }
+        const std::string& column_name = command.target_column_name.value();
+        const Table& old_table = catalog_.get_database(db_name).get_table(command.table_name);
+        const std::optional<std::size_t> drop_column_id = old_table.get_column_id(column_name);
+        if(!drop_column_id.has_value()){
+            throw ExecutionError("Column does not exist: " + column_name);
+        }
+        const Column& drop_column = old_table.get_column(drop_column_id.value());
+        //primary key column cannot be dropped
+        if(drop_column.is_primary_key()){
+            throw ExecutionError("Cannot drop primary key column: " + column_name);
+        }
+        //table must have at least 1 column
+        if(old_table.get_columns().size() == 1){
+            throw ExecutionError("Cannot drop the only column in the table: " + column_name);
+        }
+        std::vector<Column> new_columns = old_table.get_columns();
+        new_columns.erase(new_columns.begin() + drop_column_id.value());
+        Table replacement{old_table.get_name(),std::move(new_columns)};
+        //pk id may change
+        const std::optional<std::size_t> old_pk_id = old_table.get_pk_id();
+        const std::optional<std::size_t> new_pk_id = replacement.get_pk_id();
+        const std::filesystem::path data_path = table_path(db_name,command.table_name);
+        const std::filesystem::path index_path = table_index_path(db_name,command.table_name);
+        //create new data and index file paths
+        std::filesystem::path new_data_path = data_path;
+        new_data_path += ".alter_new";
+        std::filesystem::path new_index_path = index_path;
+        new_index_path += ".alter_new";
+        const auto path_exists = [](const std::filesystem::path& path){
+            std::error_code error;
+            const bool exists = std::filesystem::exists(path,error);
+            if(error){
+                throw ExecutionError("failed to check if file exists: " + path.string() + ": " + error.message()); 
+            }
+            return exists;
+        };
+        if(!path_exists(data_path)){
+            throw ExecutionError("Table data file does not exist: " + data_path.string());
+        }
+        if(old_pk_id.has_value() && !path_exists(index_path)){
+            throw ExecutionError("Table index file does not exist: " + index_path.string());
+        }
+        if(path_exists(new_data_path)){
+            throw ExecutionError("Temporary table data file already exists: " + new_data_path.string());
+        }
+        if(path_exists(new_index_path)){
+            throw ExecutionError("Temporary table index file already exists: " + new_index_path.string());
+        }
+        //create temporary new data and index files
+        std::size_t rewritten_rows = 0;
+        //rename original files
+        std::filesystem::path backup_data_path = data_path;
+        backup_data_path += ".alter_old";
+        std::filesystem::path backup_index_path = index_path;
+        backup_index_path += ".alter_old";
+        if(path_exists(backup_data_path)){
+            throw ExecutionError(
+            "Temporary backup data file already exists: " +
+                backup_data_path.string()
+            );
+        }
+        if(old_pk_id.has_value() && path_exists(backup_index_path)){
+            throw ExecutionError(
+            "Temporary backup index file already exists: " +
+                backup_index_path.string()
+            );
+        }
+        try{
+            TableFile old_file{data_path};
+            std::vector<TableFile::row_entry> old_rows = old_file.scan_all_rows();
+            TableFile new_file{new_data_path};
+            std::optional<BPlusTree> new_index;
+            if(old_pk_id.has_value()){
+                const DataType pk_type = old_table.get_column(old_pk_id.value()).get_type();
+                new_index.emplace(new_index_path,pk_type);
+            }
+            for(const auto& entry : old_rows){
+                //copy all values from old row
+                std::vector<Value> new_values = entry.row.get_values();
+                if(drop_column_id.value() >= new_values.size()){
+                    throw ExecutionError("Invalid column id for DROP COLUMN");
+                }
+                new_values.erase(new_values.begin() + drop_column_id.value());
+                Row new_row{std::move(new_values)};
+                //the offset can be diffferent between the old and new file
+                //we must get the new offset and use it
+                const TableFile::Row_offset new_offset = new_file.insert_row(new_row);
+                if(new_index.has_value()){
+                    const Value& pk_value = new_row.get_value(new_pk_id.value());
+                    new_index->insert(pk_value,new_offset);
+                }
+                ++rewritten_rows;
+            }
+        }catch(const std::exception& exception){
+            //rollback if any error occurs
+            std::error_code rollback_error;
+            std::filesystem::remove(new_data_path,rollback_error);
+            if(rollback_error){
+                throw ExecutionError("Failed to prepare files for DROP COLUMN: " + std::string(exception.what()) + "; Failed to remove temporary new table data file: " + rollback_error.message());
+            }
+            rollback_error.clear();
+            std::filesystem::remove(new_index_path,rollback_error);
+            if(rollback_error){
+                throw ExecutionError("Failed to prepare files for DROP COLUMN: " + std::string(exception.what()) + "; Failed to remove temporary new table index file: " + rollback_error.message());
+            }
+            throw ExecutionError("Failed to prepare files for DROP COLUMN: " + std::string(exception.what()));
+        }
+        const Catalog catalog_backup = catalog_;
+        bool old_data_backed_up = false;
+        bool old_index_backed_up = false;
+        bool new_data_installed = false;
+        bool new_index_installed = false;
+        try{
+            //backup original files with renaming them
+            std::error_code error;
+            std::filesystem::rename(data_path,backup_data_path,error);
+            if(error){
+                throw ExecutionError("Failed to backup table data file: " + data_path.string() + " to " + backup_data_path.string() + ": " + error.message());
+            }
+            old_data_backed_up = true;
+            if(old_pk_id.has_value()){
+                error.clear();
+                std::filesystem::rename(index_path,backup_index_path,error);
+                if(error){
+                    throw ExecutionError("Failed to backup table index file: " + index_path.string() + " to " + backup_index_path.string() + ": " + error.message());
+                }
+                old_index_backed_up = true;
+            }
+            // install new files by renaming them
+            error.clear();
+            std::filesystem::rename(new_data_path,data_path,error);
+            if(error){
+                throw ExecutionError("Failed to install new table data file: " + new_data_path.string() + " to " + data_path.string() + ": " + error.message());
+            }
+            new_data_installed = true;
+            if(old_pk_id.has_value()){
+                error.clear();
+                std::filesystem::rename(new_index_path,index_path,error);
+                if(error){
+                    throw ExecutionError("Failed to install new table index file: " + new_index_path.string() + " to " + index_path.string() + ": " + error.message());
+                }
+                new_index_installed = true;
+            }
+            catalog_.replace_table(db_name,command.table_name,std::move(replacement));
+            save_catalog();
+        }catch(const std::exception& exception){
+            //rollback if any error occurs
+            catalog_ = catalog_backup;
+            std::string rollback_error;
+            const auto append_rollback_error = [&rollback_error](const std::string& msg){
+                if(!rollback_error.empty()){
+                    rollback_error += "; ";
+                }
+                rollback_error += msg;
+            };
+            std::error_code re;
+            //recover original files
+            if(new_index_installed){
+                std::filesystem::remove(index_path,re);
+                if(re){
+                    append_rollback_error("Failed to remove new table index file: " + re.message());
+                }
+            }
+            re.clear();
+            if(new_data_installed){
+                std::filesystem::remove(data_path,re);
+                if(re){
+                    append_rollback_error("Failed to remove new table data file: " + re.message());
+                }
+            }
+            re.clear();
+            if(old_index_backed_up){
+                std::filesystem::rename(backup_index_path,index_path,re);
+                if(re){
+                    append_rollback_error("Failed to restore original table index file: " + re.message());
+                }
+            }
+            re.clear();
+            if(old_data_backed_up){
+                std::filesystem::rename(backup_data_path,data_path,re);
+                if(re){
+                    append_rollback_error("Failed to restore original table data file: " + re.message());
+                }
+            }
+            re.clear();
+            //remove temporary new files if they still exist
+            std::filesystem::remove(new_data_path,re);
+            if(re){
+                append_rollback_error("Failed to remove temporary new table data file: " + re.message());
+            }
+            re.clear();
+            std::filesystem::remove(new_index_path,re);
+            if(re){
+                append_rollback_error("Failed to remove temporary new table index file: " + re.message());
+            }
+            std::string msg = "Failed to drop column '" + column_name + "': " + exception.what();
+            if(!rollback_error.empty()){
+                msg += "; Rollback error: " + rollback_error;
+            }
+            throw ExecutionError(msg);
+        }
+        //remove backup files if everything is successful
+        std::string cleanup_warning;
+        std::error_code cleanup_error;
+        std::filesystem::remove(backup_data_path,cleanup_error);
+        if(cleanup_error){
+            cleanup_warning += "Failed to remove backup table data file: " + cleanup_error.message();
+        }
+        if(old_pk_id.has_value()){
+            cleanup_error.clear();
+            std::filesystem::remove(backup_index_path,cleanup_error);
+            if(cleanup_error){
+                if(!cleanup_warning.empty()){
+                    cleanup_warning += "; ";
+                }
+                cleanup_warning += "Failed to remove backup table index file: " + cleanup_error.message();
+            }
+        }
+        ExecutionResult res{};
+        res.affected_rows = rewritten_rows;
+        res.message = "Column '" + column_name + "' dropped from table '" + command.table_name + "'; " + std::to_string(rewritten_rows) + " rows rewritten";
+        if(!cleanup_warning.empty()){
+            res.message += "; Warning: " + cleanup_warning;
+        }
+        return res;
     }
 }

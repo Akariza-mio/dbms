@@ -65,4 +65,15 @@ namespace minidb{
         }
         tables_.erase(tables_.begin() + table_id.value());
     }
+    void Database::replace_table(const std::string& old_name,Table replacement){
+        const std::optional<std::size_t> old_id = get_table_id(old_name);
+        if(!old_id.has_value()){
+            throw std::invalid_argument("Table with the given name does not exist");
+        }
+        const std::optional<std::size_t> new_id = get_table_id(replacement.get_name());
+        if(new_id.has_value() && new_id.value() != old_id.value()){
+            throw std::invalid_argument("Table with the same name as the replacement already exists");
+        }
+        tables_.at(old_id.value()) = std::move(replacement);
+    }
 }

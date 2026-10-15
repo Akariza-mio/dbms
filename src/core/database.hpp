@@ -18,6 +18,7 @@ public:
     [[nodiscard]] const Table& get_table(const std::string& name) const;
     void add_table(Table table);
     void drop_table(const std::string& name);
+    void replace_table(const std::string& old_name,Table replacement);
 private:
     std::string name_;
     std::vector<Table> tables_;

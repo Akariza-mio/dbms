@@ -58,16 +58,17 @@ namespace minidb::sql{
                 continue;
             }
             //scan TokenType::STRING_LITERAL
-            if(c == '\''){
+            if(c == '\'' || c == '"'){
+                const char quote_char = c;
                 const std::size_t start = pos;
                 ++pos;
                 std::string value;
                 bool closed = false;
                 while(pos < sql.size()){
                     //two continous single quotes mean a single quote in string literal
-                    if(sql[pos] == '\''){
-                        if(pos + 1 < sql.size() && sql[pos + 1] == '\''){
-                            value.push_back('\'');
+                    if(sql[pos] == quote_char){
+                        if(pos + 1 < sql.size() && sql[pos + 1] == quote_char){
+                            value.push_back(quote_char);
                             pos += 2;
                             continue;
                         }

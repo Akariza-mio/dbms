@@ -248,4 +248,8 @@ namespace minidb{
         }
         return res;
     }
+    void Catalog::replace_table(const std::string& db_name,const std::string& old_name,Table replacement){
+        Database& db = get_database(db_name);
+        db.replace_table(old_name,std::move(replacement));
+    }
 }

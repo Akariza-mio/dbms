@@ -27,6 +27,7 @@ public:
 
     void save_to_file(const std::filesystem::path& path) const;
     [[nodiscard]] static Catalog load_from_file(const std::filesystem::path& path);
+    void replace_table(const std::string& db_name,const std::string& old_name,Table replacement);
 private:
     std::vector<Database> databases_;
 };

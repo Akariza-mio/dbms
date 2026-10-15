@@ -102,5 +102,11 @@ private:
     };
     [[nodiscard]] aggregatePlan create_aggregate_plan(const Table& table,const sql::SQLCommand& command) const;
     [[nodiscard]] std::string calculate_aggregate(const parsedSelectItem& item,const std::vector<const Row*>& rows) const;
+    //alter table
+    [[nodiscard]] ExecutionResult execute_alter_table(const sql::SQLCommand& command);
+    [[nodiscard]] ExecutionResult execute_rename_column(const sql::SQLCommand& command);
+    [[nodiscard]] ExecutionResult execute_rename_table(const sql::SQLCommand& command);
+    [[nodiscard]] ExecutionResult execute_add_column(const sql::SQLCommand& command);
+    [[nodiscard]] ExecutionResult execute_drop_column(const sql::SQLCommand& command);
 };
 }
