@@ -24,13 +24,26 @@ add_library(minidbms_core
     src/sql/parser.cpp
     src/execution/executor.cpp
 )
+# 数据库网络库
+add_library(minidbms_net
+    src/net/socket.cpp
+    src/net/io.cpp
+    src/net/json.cpp
+    src/net/server.cpp
+)
 
 # 允许链接 minidbms_core 的目标使用形如 "core/value.hpp" 的包含路径
 target_include_directories(minidbms_core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+target_include_directories(minidbms_net
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 
 add_executable(server src/server_main.cpp)
-target_link_libraries(server PRIVATE minidbms_core)
+target_link_libraries(server PRIVATE
+    minidbms_core
+    minidbms_net
+)
 
 add_executable(client src/client_main.cpp)
