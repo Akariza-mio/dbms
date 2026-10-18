@@ -30,6 +30,7 @@ add_library(minidbms_net
     src/net/io.cpp
     src/net/json.cpp
     src/net/server.cpp
+    src/net/client.cpp
 )
 
 # 允许链接 minidbms_core 的目标使用形如 "core/value.hpp" 的包含路径
@@ -45,5 +46,19 @@ target_link_libraries(server PRIVATE
     minidbms_core
     minidbms_net
 )
-
+find_path(READLINE_INCLUDE_DIR
+    NAMES readline/readline.h
+    REQUIRED
+)
+find_library(READLINE_LIBRARY
+    NAMES readline
+    REQUIRED
+)
 add_executable(client src/client_main.cpp)
+target_include_directories(client
+    PRIVATE ${READLINE_INCLUDE_DIR}
+)
+target_link_libraries(client PRIVATE
+    minidbms_net
+    ${READLINE_LIBRARY}
+)
