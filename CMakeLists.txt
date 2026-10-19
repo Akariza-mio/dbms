@@ -41,10 +41,12 @@ target_include_directories(minidbms_net
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+find_package(Threads REQUIRED)
 add_executable(server src/server_main.cpp)
 target_link_libraries(server PRIVATE
     minidbms_core
     minidbms_net
+    Threads::Threads
 )
 find_path(READLINE_INCLUDE_DIR
     NAMES readline/readline.h

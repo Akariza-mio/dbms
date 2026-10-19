@@ -18,6 +18,9 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <mutex>
+#include <memory>
+#include <thread>
 
 namespace {
     std::string format_execution_result(const minidb::ExecutionResult& result){
@@ -72,7 +75,7 @@ namespace {
         std::string frame = minidb::net::to_json(response) + '\n';
         minidb::net::send_all(fd,frame);
     }
-    void handle_client(minidb::net::Socket client,const std::filesystem::path& data_directory){
+    void handle_client(minidb::net::Socket client,const std::filesystem::path& data_directory,std::mutex& db_mutex){
         const int fd = client.get_fd();
         //executor
         minidb::Executor executor(data_directory);
@@ -95,7 +98,11 @@ namespace {
             try{
                 minidb::sql::Parser parser(line.value());
                 minidb::sql::SQLCommand command = parser.parse();
-                minidb::ExecutionResult result = executor.execute(command);
+                minidb::ExecutionResult result;
+                {
+                    std::lock_guard<std::mutex> lock(db_mutex);
+                    result = executor.execute(command);
+                }
                 response.ok = true;
                 response.message = format_execution_result(result);
             }catch(const std::exception& error){
@@ -103,6 +110,20 @@ namespace {
                 response.message = error.what();
             }
             send_response(fd,response);
+        }
+    }
+    void client_thread(
+        minidb::net::Socket client,
+        std::filesystem::path data_directory,
+        std::shared_ptr<std::mutex> db_mutex
+    ) noexcept{
+        //const int fd = client.get_fd();
+        try{
+            handle_client(std::move(client),data_directory,*db_mutex);
+        }catch(const std::exception& error){
+            std::cerr << "Error in client thread: " << error.what() << '\n';
+        }catch(...){
+            std::cerr << "Unknown error in client thread\n";
         }
     }
     std::uint16_t parse_port(int argc,char* argv[]){
@@ -128,16 +149,16 @@ int main(int argc,char* argv[]) {
         const std::filesystem::path data_directory = "data";
         //create listener
         minidb::net::Socket listener = minidb::net::create_tcp_listener(port);
-        std::cout
-            << "MiniDBMS server is listening on 127.0.0.1:"
-            << port
-            << std::endl;
+        std::cout << "MiniDBMS server is listening on 127.0.0.1:" << port << std::endl;
+        auto db_mutex = std::make_shared<std::mutex>();
         //keep listening and accepting clients
         while(true){
             minidb::net::Socket client = minidb::net::accept_client(listener.get_fd());
             std::cout << "Client connected, socket fd = " << client.get_fd() << std::endl;
             try{
-                handle_client(std::move(client),data_directory);
+                std::thread cl_thread(client_thread,std::move(client),data_directory,db_mutex);
+                //detach the thread to allow it to run independently
+                cl_thread.detach();
             } catch (const std::exception& exception) {
                 std::cerr << "Error handling client: " << exception.what() << '\n';
             }

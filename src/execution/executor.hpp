@@ -108,5 +108,6 @@ private:
     [[nodiscard]] ExecutionResult execute_rename_table(const sql::SQLCommand& command);
     [[nodiscard]] ExecutionResult execute_add_column(const sql::SQLCommand& command);
     [[nodiscard]] ExecutionResult execute_drop_column(const sql::SQLCommand& command);
+    void reload_catalog();
 };
 }

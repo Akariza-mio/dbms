@@ -88,6 +88,7 @@ namespace minidb {
     }
     ExecutionResult Executor::execute(const sql::SQLCommand& command){
         try{
+            reload_catalog();
             //dispatch command to corresponding executor function
             switch(command.type){
                 case sql::CommandType::CREATE_DATABASE:
@@ -1768,5 +1769,16 @@ namespace minidb {
             res.message += "; Warning: " + cleanup_warning;
         }
         return res;
+    }
+    void Executor::reload_catalog(){
+        try{
+            Catalog refreshed = Catalog::load_from_file(catalog_path_);
+            if(now_database_.has_value() && !refreshed.get_database_id(now_database_.value()).has_value()){
+                now_database_.reset();
+            }
+            catalog_ = std::move(refreshed);
+        }catch(const std::exception& exception){
+            throw ExecutionError("Failed to reload catalog: " + std::string(exception.what()));
+        }
     }
 }
