@@ -188,6 +188,41 @@ data/
 - `.idx`：以4096字节固定页组织的 B+ 树文件，第0页保存索引元数据和根页号。
 
 `data/` 已被 `.gitignore` 忽略。
+### 6.1 领域关系模型
+
+当前数据的领域关系模型：
+
+```text
+Catalog
+└── vector<Database>
+    └── vector<Table>
+        └── vector<Column>
+
+Row
+└── vector<Value>
+```
+
+### 6.2 catalog的文件格式
+
+以下面的格式为例：
+
+```text
+MINIDBMS_CATALOG 1 //表示格式版本
+DATABASE_COUNT 1 //数据库数量
+DATABASE school 1 //名为school的数据库中有一个表
+TABLE student 4 //在school这个数据库中的名为student的表，它有4列
+COLUMN id INT 1 //student表中名为id的列是主键，类型为INT
+COLUMN name STRING 0
+COLUMN age INT 0
+COLUMN score FLOAT 0
+END_TABLE //结束标记
+END_DATABASE
+END_CATALOG
+```
+
+原子保存：
+
+不覆盖正式文件，而是先生成临时文件，检查写入和关闭是否成功，再重命名为catalog.meta
 
 ## 7. 部署与运行
 
