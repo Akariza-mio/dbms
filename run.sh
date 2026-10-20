@@ -2,11 +2,11 @@
 # 遇到错误立即停止脚本运行
 set -e
 
-# 如果没有 build 目录，先自动初始化 CMake 配置（Debug 模式）
-if [ ! -d "build" ]; then
-    echo "===> 检测到 build 目录不存在，初始化 CMake 配置..."
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-fi
+# 每次运行都重新执行 CMake 配置，确保 build 目录使用 Release 模式。
+# 重新配置不会重新编译所有未发生变化的文件，但可以把已有的 Debug
+# 构建目录可靠地切换为 Release。
+echo "===> 配置构建..."
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 # 1. 多核并行编译
 echo "===> 正在编译..."
