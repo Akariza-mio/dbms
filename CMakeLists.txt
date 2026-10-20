@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
+
 # 数据库核心模型库
 add_library(minidbms_core
     src/core/value.cpp
