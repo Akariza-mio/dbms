@@ -431,9 +431,16 @@ namespace minidb {
     ExecutionResult Executor::execute_insert(const sql::SQLCommand& command){
         const std::string& db_name = require_now_database();
         const Table& table = catalog_.get_database(db_name).get_table(command.table_name);
-        //get normalized values
-        std::vector<Value> normalized_values = normalize_insert_values(table,command.values);
-        Row row{std::move(normalized_values)};
+        if(command.value_rows.empty()){
+            throw ExecutionError("INSERT must contain at least one row");
+        }
+        // Normalize every row before writing anything. A type or column-count
+        // error therefore cannot leave a partially inserted batch.
+        std::vector<Row> rows;
+        rows.reserve(command.value_rows.size());
+        for(const std::vector<Value>& input_row : command.value_rows){
+            rows.emplace_back(normalize_insert_values(table,input_row));
+        }
         //get table data path
         const std::filesystem::path data_path = table_path(db_name,command.table_name);
         std::error_code error;
@@ -446,13 +453,10 @@ namespace minidb {
         }
         TableFile table_file{data_path};
         const std::optional<std::size_t> pk_id = table.get_pk_id();
-        if(!pk_id.has_value()){
-            //only insert into .dat file
-            static_cast<void>(table_file.insert_row(row));
-        }else{
+        std::optional<BPlusTree> index;
+        if(pk_id.has_value()){
             const std::size_t key_id = pk_id.value();
             const Column& pk_column = table.get_column(key_id);
-            const Value& pk = row.get_value(key_id);
             const std::filesystem::path index_path = table_index_path(db_name,command.table_name);
             error.clear();
             const bool index_exists = std::filesystem::exists(index_path,error);
@@ -462,29 +466,73 @@ namespace minidb {
             if(!index_exists){
                 throw ExecutionError("table index file does not exist: " + index_path.string());
             }
-            BPlusTree index{index_path,pk_column.get_type()};
-            // check for duplicate primary key before inserting
-            if(index.search(pk).has_value()){
-                throw ExecutionError("Duplicate primary key value for column '" + pk_column.get_name() + "': " + pk.to_string());
-            }
-            //insert will return the row offset of the inserted row in the .dat file
-            const TableFile::Row_offset row_offset = table_file.insert_row(row);
-            try{
-                //insert into B+ tree
-                index.insert(pk,row_offset);
-            }catch(const std::exception& exception) {
-                try {
-                    //rollback the .dat file if B+ tree insertion fails
-                    table_file.delete_row(row_offset);
-                }catch(const std::exception& rollback_exception){
-                    throw ExecutionError("Failed to insert into B+ tree: " + std::string(exception.what()) + "; Failed to rollback .dat file: " + rollback_exception.what());
+            index.emplace(index_path,pk_column.get_type());
+            // Check both the existing index and duplicate keys within this
+            // batch before the first row is appended to the table file.
+            std::set<Value> batch_keys;
+            for(const Row& row : rows){
+                const Value& pk = row.get_value(key_id);
+                if(!batch_keys.insert(pk).second){
+                    throw ExecutionError("Duplicate primary key value within INSERT batch for column '" + pk_column.get_name() + "': " + pk.to_string());
                 }
-                throw ExecutionError("Failed to insert into B+ tree: " + std::string(exception.what()));
+                if(index->search(pk).has_value()){
+                    throw ExecutionError("Duplicate primary key value for column '" + pk_column.get_name() + "': " + pk.to_string());
+                }
             }
         }
+
+        std::vector<TableFile::Row_offset> inserted_offsets;
+        inserted_offsets.reserve(rows.size());
+        std::size_t indexed_row_count = 0;
+        try{
+            for(const Row& row : rows){
+                const TableFile::Row_offset row_offset = table_file.insert_row(row);
+                inserted_offsets.push_back(row_offset);
+                if(index.has_value()){
+                    index->insert(row.get_value(pk_id.value()),row_offset);
+                    ++indexed_row_count;
+                }
+            }
+        }catch(const std::exception& exception){
+            std::string rollback_errors;
+            const auto append_rollback_error = [&rollback_errors](const std::string& message){
+                if(!rollback_errors.empty()){
+                    rollback_errors += "; ";
+                }
+                rollback_errors += message;
+            };
+            // Remove index entries first, then hide every appended row with a
+            // tombstone. Reverse order mirrors the insertion order.
+            if(index.has_value()){
+                for(std::size_t i = indexed_row_count; i > 0; --i){
+                    try{
+                        const Value& key = rows[i - 1].get_value(pk_id.value());
+                        if(!index->erase(key)){
+                            append_rollback_error("index key was not found during rollback: " + key.to_string());
+                        }
+                    }catch(const std::exception& rollback_exception){
+                        append_rollback_error("failed to rollback index: " + std::string(rollback_exception.what()));
+                    }
+                }
+            }
+            for(auto offset = inserted_offsets.rbegin(); offset != inserted_offsets.rend(); ++offset){
+                try {
+                    table_file.delete_row(*offset);
+                }catch(const std::exception& rollback_exception){
+                    append_rollback_error("failed to rollback table row: " + std::string(rollback_exception.what()));
+                }
+            }
+            std::string message = "Failed to insert row batch: " + std::string(exception.what());
+            if(!rollback_errors.empty()){
+                message += "; rollback errors: " + rollback_errors;
+            }
+            throw ExecutionError(message);
+        }
         ExecutionResult res{};
-        res.affected_rows = 1;
-        res.message = "1 row inserted successfully into table '" + table.get_name() + "'";
+        res.affected_rows = rows.size();
+        res.message = std::to_string(res.affected_rows) +
+            (res.affected_rows == 1 ? " row inserted successfully into table '" : " rows inserted successfully into table '") +
+            table.get_name() + "'";
         return res;
     }
     std::vector<Executor::parsedCondition> Executor::parse_conditions(const Table& table,const sql::SQLCommand& command) const{

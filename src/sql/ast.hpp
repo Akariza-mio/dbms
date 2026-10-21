@@ -81,8 +81,8 @@ namespace minidb::sql{
         std::string table_name;
         //create table
         std::vector<ColumnDefinition> columns;
-        //insert
-        std::vector<Value> values;
+        //insert: each inner vector is one row from a VALUES tuple
+        std::vector<std::vector<Value>> value_rows;
         //update set
         std::vector<Assignment> assignments;
         //select

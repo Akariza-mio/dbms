@@ -312,21 +312,31 @@ namespace minidb::sql{
         match_keyword("into");
         command.table_name = expect_identifier("table name");
         expect_keyword("values");
-        expect(TokenType::LEFT_PAREN,"expected '(' after 'VALUES'");
-        //VALUES () is not allowed
-        if(check(TokenType::RIGHT_PAREN)){
-            throw ParserError(current().pos,"expected at least one value in 'VALUES'");
-        }
         while(true){
-            command.values.push_back(parse_literal());
-            if(match(TokenType::COMMA)){
-                if(check(TokenType::RIGHT_PAREN)){
-                    throw ParserError(current().pos,"expected value after ','");
-                }
-                continue;
+            expect(TokenType::LEFT_PAREN,"expected '(' before a VALUES row");
+            std::vector<Value> row_values;
+            //VALUES () is not allowed
+            if(check(TokenType::RIGHT_PAREN)){
+                throw ParserError(current().pos,"expected at least one value in a VALUES row");
             }
-            expect(TokenType::RIGHT_PAREN,"expected ',' or ')' after values");
-            break;
+            while(true){
+                row_values.push_back(parse_literal());
+                if(match(TokenType::COMMA)){
+                    if(check(TokenType::RIGHT_PAREN)){
+                        throw ParserError(current().pos,"expected value after ','");
+                    }
+                    continue;
+                }
+                expect(TokenType::RIGHT_PAREN,"expected ',' or ')' after value");
+                break;
+            }
+            command.value_rows.push_back(std::move(row_values));
+            if(!match(TokenType::COMMA)){
+                break;
+            }
+            if(!check(TokenType::LEFT_PAREN)){
+                throw ParserError(current().pos,"expected '(' after ',' between VALUES rows");
+            }
         }
         expect_statement_end();
         return command;

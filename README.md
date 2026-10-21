@@ -18,7 +18,7 @@ MiniDBMS 是一个使用 C++20 实现的轻型关系型数据库。项目采用�
 
 - 数据库：`CREATE DATABASE`、`DROP DATABASE`、`USE`、`SHOW DATABASES`。
 - 表：`CREATE TABLE`、`DROP TABLE`、`SHOW TABLES`。
-- 数据：`INSERT`、`SELECT`、`UPDATE`、`DELETE`。
+- 数据：单行/批量 `INSERT`、`SELECT`、`UPDATE`、`DELETE`。
 - 查询：`SELECT *`、单列/多列投影、`= / < / >` 条件、`AND / OR` 条件链。
 - 聚合：`COUNT`、`MAX`、`MIN`、`AVG`。
 - 分组：单列 `GROUP BY`。
@@ -185,7 +185,7 @@ B+ 树只保存“主键到 `.dat` 行偏移”的映射，完整行仍然保存
 
 ### 6.3 写入、更新与删除流程
 
-- `INSERT`：先检查列数、类型和主键是否重复，再向 `.dat` 追加行；有主键时把主键和新行偏移写入 `.idx`。
+- `INSERT`：支持 `VALUES (...), (...)` 批量写入；先检查整批数据的列数、类型和主键是否重复，再向 `.dat` 追加行；有主键时把主键和新行偏移写入 `.idx`。批次写入失败时会撤销本批已经插入的索引键，并用墓碑隐藏本批已经追加的行。
 - `DELETE`：将 `.dat` 中的行标记为墓碑，并从主键索引删除对应键；不移动其他行。
 - `UPDATE`：先检查类型和新主键冲突，再追加修改后的新行、更新索引，最后将旧行标记为删除。
 - `ALTER TABLE`：需要改变行布局时创建临时数据文件，重写活动行并重建索引，再替换原文件。
@@ -373,7 +373,9 @@ CREATE TABLE students (
 );
 
 INSERT INTO students VALUES (1, 'Alice', 92.5);
-INSERT INTO students VALUES (2, 'Bob', 80);
+INSERT INTO students VALUES
+    (2, 'Bob', 80),
+    (3, 'Carol', 87.5);
 
 SELECT * FROM students;
 SELECT name, score FROM students WHERE id = 1;
